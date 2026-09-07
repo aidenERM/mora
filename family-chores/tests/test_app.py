@@ -69,6 +69,13 @@ def test_external_password_and_admin_are_separate(app):
     assert client.post("/api/admin/login", json={"password": "admin"}).status_code == 200
 
 
+def test_home_network_bypass(app):
+    _, client, path = app
+    seed(path)
+    client.environ_base["REMOTE_ADDR"] = "127.0.0.1"
+    assert client.get("/api/members").status_code == 200
+
+
 def test_calendar_uid_and_revocation(app):
     _, client, path = app
     today = date.today()
@@ -82,3 +89,4 @@ def test_calendar_uid_and_revocation(app):
     assert first.get_data().count(uid) == 1
     conn = conn_for(path); conn.execute("UPDATE feed_tokens SET revoked_at='now' WHERE token_hash=?", (__import__("hashlib").sha256(token.encode()).hexdigest(),)); conn.commit(); conn.close()
     assert client.get("/calendar/" + token + ".ics").status_code == 404
+
