@@ -1,9 +1,9 @@
-import json
+import hashlib
 from datetime import date, timedelta
 
 import pytest
 
-from family_chores.app import create_app, conn_for, init_db, resolve, week_for
+from family_chores.app import create_app, conn_for, event_for, resolve, week_for
 
 
 @pytest.fixture()
@@ -62,10 +62,12 @@ def test_external_password_and_admin_are_separate(app):
     _, client, _ = app
     client.environ_base["REMOTE_ADDR"] = "198.51.100.9"
     assert client.get("/api/members").status_code == 401
+    assert client.post("/api/login", json={"password": "wrong"}).status_code == 401
     assert client.post("/api/login", json={"password": "family"}).status_code == 200
     assert client.get("/api/members").status_code == 200
     client.post("/api/logout")
     assert client.post("/api/admin/login", json={"password": "family"}).status_code == 401
+    assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 401
     assert client.post("/api/admin/login", json={"password": "admin"}).status_code == 200
 
 
@@ -89,4 +91,50 @@ def test_calendar_uid_and_revocation(app):
     assert first.get_data().count(uid) == 1
     conn = conn_for(path); conn.execute("UPDATE feed_tokens SET revoked_at='now' WHERE token_hash=?", (__import__("hashlib").sha256(token.encode()).hexdigest(),)); conn.commit(); conn.close()
     assert client.get("/calendar/" + token + ".ics").status_code == 404
+
+
+def test_expired_session(app):
+    application, client, _ = app
+    client.environ_base["REMOTE_ADDR"] = "198.51.100.9"
+    client.post("/api/login", json={"password": "family"})
+    application.config["PERMANENT_SESSION_LIFETIME"] = timedelta(seconds=-1)
+    assert client.get("/api/members").status_code == 401
+
+
+def test_duplicate_calendar_generation_has_unique_uids(app):
+    _, client, path = app
+    seed(path, date.today().isoformat())
+    with client.session_transaction() as session: session["family_ok"] = True
+    token_one = client.post("/api/calendar-token/alex").get_json()["url"].split("/")[-1][:-4]
+    token_two = client.post("/api/calendar-token/alex").get_json()["url"].split("/")[-1][:-4]
+    for token in (token_one, token_two):
+        body = client.get("/calendar/" + token + ".ics").get_data(as_text=True)
+        uids = [line for line in body.splitlines() if line.startswith("UID:")]
+        assert len(uids) == len(set(uids))
+
+
+def test_vacation_spans_multiple_days_and_assignment_can_move(app):
+    _, client, path = app
+    seed(path)
+    conn = conn_for(path)
+    conn.execute("INSERT INTO assignments(member_id,chore_id,weekday,week,notes,updated_at) VALUES(1,1,1,'A','','now')")
+    conn.execute("INSERT INTO exceptions(exception_date,end_date,member_id,assignment_id,exception_type,note,created_at) VALUES('2026-01-05','2026-01-06',1,NULL,'vacation','away','now')")
+    conn.commit()
+    assert resolve(conn, 1, date(2026, 1, 5)) == []
+    assert resolve(conn, 1, date(2026, 1, 6)) == []
+    conn.execute("UPDATE assignments SET member_id=2 WHERE id=1")
+    conn.commit()
+    assert resolve(conn, 1, date(2026, 1, 5)) == []
+    assert resolve(conn, 2, date(2026, 1, 5))[0]["name"] == "dishes"
+    conn.close()
+
+
+def test_timezone_boundary_and_malformed_admin_input(app):
+    _, client, _ = app
+    item = {"assignment_id": 9, "date": "2026-01-05", "name": "late tidy", "description": "", "suggested_time": "23:45", "notes": ""}
+    event = event_for(item, "America/Bogota")
+    assert event["start"].startswith("2026-01-05T23:45")
+    assert event["end"].startswith("2026-01-06T00:15")
+    assert client.post("/api/admin/settings", json={"anchor_date": "not-a-date"}).status_code == 400
+    assert client.post("/api/admin/assignments", json={"week": "A", "weekday": 0}).status_code == 400
 
