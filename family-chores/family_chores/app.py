@@ -348,6 +348,21 @@ def create_app(test_config=None):
     @app.post("/api/admin/members/<int:item_id>/rotate-tokens")
     @admin_required
     def rotate_tokens(item_id):
-        with db(): db().execute("UPDATE feed_tokens SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL", (now_utc(), item_id))
-        return jsonify(ok=True)
+        member = db().execute("SELECT * FROM members WHERE id=? AND active=1", (item_id,)).fetchone()
+        if not member: return jsonify(error="member_not_found"), 404
+        token = secrets.token_urlsafe(48)
+        with db():
+            db().execute("UPDATE feed_tokens SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL", (now_utc(), item_id))
+            db().execute("INSERT INTO feed_tokens(member_id,token_hash,created_at) VALUES(?,?,?)", (item_id, digest_token(token), now_utc()))
+        return jsonify(ok=True, url=request.host_url.rstrip("/") + "/calendar/" + token + ".ics", webcal_url="webcal://" + request.host + "/calendar/" + token + ".ics")
+
+    @app.post("/api/admin/members/<int:item_id>/calendar-token")
+    @admin_required
+    def admin_calendar_token(item_id):
+        member = db().execute("SELECT * FROM members WHERE id=? AND active=1", (item_id,)).fetchone()
+        if not member: return jsonify(error="member_not_found"), 404
+        token = secrets.token_urlsafe(48)
+        with db(): db().execute("INSERT INTO feed_tokens(member_id,token_hash,created_at) VALUES(?,?,?)", (item_id, digest_token(token), now_utc()))
+        return jsonify(ok=True, url=request.host_url.rstrip("/") + "/calendar/" + token + ".ics", webcal_url="webcal://" + request.host + "/calendar/" + token + ".ics")
     return app
+
