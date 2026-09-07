@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members(id INTEGER PRIMARY KEY, slug TEXT UNIQUE NOT NULL, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS chores(id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', suggested_time TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS assignments(id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, chore_id INTEGER NOT NULL, weekday INTEGER NOT NULL CHECK(weekday BETWEEN 0 AND 6), week TEXT NOT NULL CHECK(week IN ('A','B')), notes TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL, FOREIGN KEY(member_id) REFERENCES members(id), FOREIGN KEY(chore_id) REFERENCES chores(id));
-CREATE TABLE IF NOT EXISTS exceptions(id INTEGER PRIMARY KEY, exception_date TEXT NOT NULL, member_id INTEGER, assignment_id INTEGER, exception_type TEXT NOT NULL CHECK(exception_type IN ('skip','swap','replace','vacation','note')), replacement_chore_id INTEGER, replacement_member_id INTEGER, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS exceptions(id INTEGER PRIMARY KEY, exception_date TEXT NOT NULL, end_date TEXT NOT NULL DEFAULT '', member_id INTEGER, assignment_id INTEGER, exception_type TEXT NOT NULL CHECK(exception_type IN ('skip','swap','replace','vacation','note')), replacement_chore_id INTEGER, replacement_member_id INTEGER, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feed_tokens(id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, token_hash TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS event_history(uid TEXT PRIMARY KEY, member_id INTEGER NOT NULL, event_date TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, payload_hash TEXT NOT NULL, payload TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0, last_modified TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_assignments ON assignments(member_id, weekday, week, active);
@@ -46,6 +46,9 @@ def init_db(path):
     conn = conn_for(path)
     try:
         conn.executescript(SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(exceptions)").fetchall()}
+        if "end_date" not in columns:
+            conn.execute("ALTER TABLE exceptions ADD COLUMN end_date TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('anchor_date',?)", (date.today().isoformat(),))
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('schedule_version','1')")
         conn.commit()
@@ -79,7 +82,7 @@ def resolve(conn, member_id, day):
     assignments = conn.execute("""SELECT a.*, c.name chore_name, c.description chore_description, c.suggested_time chore_time
         FROM assignments a JOIN chores c ON c.id=a.chore_id
         WHERE a.member_id=? AND a.week=? AND a.weekday=? AND a.active=1 AND c.active=1 ORDER BY a.id""", (member_id, week, day.weekday())).fetchall()
-    exceptions = conn.execute("SELECT * FROM exceptions WHERE exception_date=? ORDER BY id", (day.isoformat(),)).fetchall()
+    exceptions = conn.execute("SELECT * FROM exceptions WHERE exception_date<=? AND (end_date='' OR end_date>=?) ORDER BY id", (day.isoformat(), day.isoformat())).fetchall()
     result = []
     for assignment in assignments:
         applicable = [e for e in exceptions if (e["member_id"] is None or e["member_id"] == member_id) and (e["assignment_id"] is None or e["assignment_id"] == assignment["id"])]
@@ -320,6 +323,7 @@ def create_app(test_config=None):
     @admin_required
     def admin_assignment():
         payload = request.get_json(silent=True) or {}; week = text(payload.get("week")).upper(); weekday = int(payload.get("weekday", -1))
+        if not payload.get("member_id") or not payload.get("chore_id"): return jsonify(error="member_and_chore_required"), 400
         if week not in ("A", "B") or weekday not in range(7): return jsonify(error="invalid_week_or_day"), 400
         values = (int(payload["member_id"]), int(payload["chore_id"]), weekday, week, text(payload.get("notes")), now_utc())
         with db():
@@ -337,8 +341,11 @@ def create_app(test_config=None):
     def admin_exception():
         payload = request.get_json(silent=True) or {}; kind = text(payload.get("exception_type"))
         if kind not in ("skip", "swap", "replace", "vacation", "note"): return jsonify(error="invalid_exception_type"), 400
-        values = (iso_date(payload.get("exception_date")).isoformat(), int(payload["member_id"]) if payload.get("member_id") else None, int(payload["assignment_id"]) if payload.get("assignment_id") else None, kind, int(payload["replacement_chore_id"]) if payload.get("replacement_chore_id") else None, int(payload["replacement_member_id"]) if payload.get("replacement_member_id") else None, text(payload.get("note")), now_utc())
-        with db(): db().execute("INSERT INTO exceptions(exception_date,member_id,assignment_id,exception_type,replacement_chore_id,replacement_member_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)", values); bump(db())
+        start = iso_date(payload.get("exception_date"))
+        end = iso_date(payload.get("end_date") or payload.get("exception_date"))
+        if end < start: return jsonify(error="end_date_before_start"), 400
+        values = (start.isoformat(), end.isoformat(), int(payload["member_id"]) if payload.get("member_id") else None, int(payload["assignment_id"]) if payload.get("assignment_id") else None, kind, int(payload["replacement_chore_id"]) if payload.get("replacement_chore_id") else None, int(payload["replacement_member_id"]) if payload.get("replacement_member_id") else None, text(payload.get("note")), now_utc())
+        with db(): db().execute("INSERT INTO exceptions(exception_date,end_date,member_id,assignment_id,exception_type,replacement_chore_id,replacement_member_id,note,created_at) VALUES(?,?,?,?,?,?,?,?,?)", values); bump(db())
         return jsonify(ok=True)
     @app.delete("/api/admin/exceptions/<int:item_id>")
     @admin_required
@@ -364,5 +371,11 @@ def create_app(test_config=None):
         token = secrets.token_urlsafe(48)
         with db(): db().execute("INSERT INTO feed_tokens(member_id,token_hash,created_at) VALUES(?,?,?)", (item_id, digest_token(token), now_utc()))
         return jsonify(ok=True, url=request.host_url.rstrip("/") + "/calendar/" + token + ".ics", webcal_url="webcal://" + request.host + "/calendar/" + token + ".ics")
+
+    @app.errorhandler(ValueError)
+    def bad_value(error):
+        if request.path.startswith("/api/"):
+            return jsonify(error=str(error)), 400
+        return str(error), 400
     return app
 
