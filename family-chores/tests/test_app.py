@@ -141,3 +141,27 @@ def test_timezone_boundary_and_malformed_admin_input(app):
     assert client.post("/api/admin/settings", json={"anchor_date": "not-a-date"}).status_code == 400
     assert client.post("/api/admin/assignments", json={"week": "A", "weekday": 0}).status_code == 400
 
+
+def test_spanish_calendar_and_task_status(app):
+    _, client, path = app
+    today = date.today() - timedelta(days=date.today().weekday())
+    seed(path, today.isoformat())
+    with client.session_transaction() as session: session["family_ok"] = True
+    token = client.post("/api/calendar-token/alex").get_json()["url"].split("/")[-1][:-4]
+    body = client.get("/calendar/" + token + ".ics").get_data(as_text=True)
+    assert "SUMMARY:dishes" in body
+    assert "Hora sugerida" in body
+    assert client.post("/api/status", json={"assignment_id": 1, "member_slug": "alex", "date": today.isoformat(), "status": "done"}).status_code == 200
+
+
+def test_import_preview_and_apply_is_idempotent(app):
+    _, client, path = app
+    payload = {"members": [{"name": "Ana M"}], "chores": [{"name": "Desayuno", "suggested_time": "10:00"}], "assignments": [{"member": "Ana M", "chore": "Desayuno", "weekday": 0, "week": "A"}]}
+    assert client.post("/api/admin/import-preview", json=payload).status_code == 200
+    assert client.post("/api/admin/import-apply", json=payload).status_code == 200
+    assert client.post("/api/admin/import-apply", json=payload).status_code == 200
+    conn = conn_for(path)
+    assert conn.execute("SELECT COUNT(*) FROM members WHERE slug='ana-m'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0] == 1
+    conn.close()
+
