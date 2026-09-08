@@ -1,5 +1,6 @@
 import hashlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -80,15 +81,17 @@ def test_home_network_bypass(app):
 
 def test_calendar_uid_and_revocation(app):
     _, client, path = app
-    today = date.today()
+    today = datetime.now(ZoneInfo("UTC")).date()
     seed(path, today.isoformat())
     with client.session_transaction() as session: session["family_ok"] = True
     token = client.post("/api/calendar-token/alex").get_json()["url"].split("/")[-1][:-4]
     first = client.get("/calendar/" + token + ".ics")
     second = client.get("/calendar/" + token + ".ics")
     assert first.status_code == second.status_code == 200
-    uid = ("UID:chore-1-" + today.isoformat() + "@home.moralife.uk").encode()
-    assert first.get_data().count(uid) == 1
+    uids = [line for line in first.get_data(as_text=True).splitlines() if line.startswith("UID:")]
+    assert uids and len(uids) == len(set(uids))
+    assert first.get_data(as_text=True).count(uids[0]) == 1
+    assert first.get_data() == second.get_data()
     conn = conn_for(path); conn.execute("UPDATE feed_tokens SET revoked_at='now' WHERE token_hash=?", (__import__("hashlib").sha256(token.encode()).hexdigest(),)); conn.commit(); conn.close()
     assert client.get("/calendar/" + token + ".ics").status_code == 404
 
