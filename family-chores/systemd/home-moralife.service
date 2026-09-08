@@ -8,7 +8,7 @@ User=home-moralife
 Group=home-moralife
 WorkingDirectory=/opt/home-moralife/family-chores
 EnvironmentFile=/etc/home-moralife.env
-ExecStart=/opt/home-moralife/.venv/bin/gunicorn --workers 1 --bind 127.0.0.1:8787 family_chores:create_app()
+ExecStart=/opt/home-moralife/.venv/bin/gunicorn --workers 1 --bind 127.0.0.1:8790 family_chores:create_app()
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -19,3 +19,4 @@ ReadWritePaths=/var/lib/home-moralife
 
 [Install]
 WantedBy=multi-user.target
+
