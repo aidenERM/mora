@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from family_chores.app import create_app, conn_for, event_for, resolve, week_for
+from family_chores.app import create_app, conn_for, day_rule, event_for, resolve, week_for
 
 
 @pytest.fixture()
@@ -163,5 +163,39 @@ def test_import_preview_and_apply_is_idempotent(app):
     conn = conn_for(path)
     assert conn.execute("SELECT COUNT(*) FROM members WHERE slug='ana-m'").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0] == 1
+    conn.close()
+
+
+def test_specific_holiday_uses_holiday_rule_not_weekday_row(app):
+    _, client, path = app
+    seed(path)
+    conn = conn_for(path)
+    conn.execute("INSERT INTO holidays(holiday_date,label,created_at) VALUES('2026-01-05','Festivo local','now')")
+    conn.execute("INSERT INTO holiday_assignments(member_id,chore_id,notes,updated_at) VALUES(2,2,'regla festiva','now')")
+    conn.commit()
+    assert resolve(conn, 1, date(2026, 1, 5)) == []
+    assert resolve(conn, 2, date(2026, 1, 5))[0]["name"] == "bins"
+    assert resolve(conn, 1, date(2026, 1, 19))[0]["name"] == "dishes"
+    conn.close()
+
+
+def test_weekend_note_is_rule_without_invented_assignment(app):
+    _, _, path = app
+    seed(path)
+    conn = conn_for(path)
+    conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('weekend_morning_note','Revisar la casa por la mañana')")
+    conn.commit()
+    assert day_rule(conn, date(2026, 1, 10)) == "Revisar la casa por la mañana"
+    assert resolve(conn, 1, date(2026, 1, 10)) == []
+    conn.close()
+
+
+def test_holiday_admin_is_date_specific_and_import_idempotent(app):
+    _, client, path = app
+    assert client.post("/api/admin/holidays", json={"holiday_date": "2026-12-25", "label": "Navidad"}).status_code == 200
+    assert client.post("/api/admin/holidays", json={"holiday_date": "2026-12-25", "label": "Navidad"}).status_code == 200
+    assert client.post("/api/admin/holidays", json={"holiday_date": "bad", "label": "Festivo"}).status_code == 400
+    conn = conn_for(path)
+    assert conn.execute("SELECT COUNT(*) FROM holidays WHERE holiday_date='2026-12-25'").fetchone()[0] == 1
     conn.close()
 
