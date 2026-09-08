@@ -17,4 +17,5 @@ function showLogin(){$("planner-app").classList.add("hidden");$("login").classLi
 function showError(e){$("error").textContent=e.message==="invalid_password"?"La contraseña no es correcta.":"No se pudo cargar la información. Intenta de nuevo."}
 $("login-form").onsubmit=async e=>{e.preventDefault();try{await api("/api/login",{method:"POST",body:JSON.stringify({password:$("password").value})});$("password").value="";loadMembers()}catch(x){showError(x)}};
 $("person-chip").onclick=()=>showLogin();document.querySelectorAll(".bottom-nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll(".bottom-nav button").forEach(x=>x.classList.toggle("active",x===b));document.querySelectorAll(".app-view").forEach(v=>v.classList.toggle("hidden",v.id!==b.dataset.view+"-view"));});loadMembers();
+const originalRenderSettings=renderSettings;renderSettings=()=>{originalRenderSettings();calendarLink().then(link=>{const token=link.split('/').pop().replace('.ics','');const qr=$("main-qr");if(qr){qr.src="/calendar-qr/"+token+".svg";qr.classList.remove("hidden")}})};
 
