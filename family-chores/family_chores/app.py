@@ -300,6 +300,14 @@ def create_app(test_config=None):
         response = app.response_class(calendar_body(db(), member, config), mimetype="text/calendar")
         response.headers["Cache-Control"] = "private, no-store"
         return response
+    @app.get("/calendar-qr/<token>.svg")
+    def calendar_qr(token):
+        member = db().execute("SELECT m.id FROM feed_tokens t JOIN members m ON m.id=t.member_id WHERE t.token_hash=? AND t.revoked_at IS NULL AND m.active=1", (digest_token(token),)).fetchone()
+        if not member: return jsonify(error="calendar_not_found"), 404
+        import io
+        import segno
+        output = io.BytesIO(); segno.make(request.host_url.rstrip("/") + "/calendar/" + token + ".ics").save(output, kind="svg", scale=6)
+        return app.response_class(output.getvalue(), mimetype="image/svg+xml", headers={"Cache-Control": "private, no-store"})
     @app.post("/api/admin/login")
     def admin_login():
         key = "admin:" + (request.remote_addr or "unknown")
