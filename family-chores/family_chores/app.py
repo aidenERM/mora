@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS assignments(id INTEGER PRIMARY KEY, member_id INTEGER
 CREATE TABLE IF NOT EXISTS exceptions(id INTEGER PRIMARY KEY, exception_date TEXT NOT NULL, end_date TEXT NOT NULL DEFAULT '', member_id INTEGER, assignment_id INTEGER, exception_type TEXT NOT NULL CHECK(exception_type IN ('skip','swap','replace','vacation','note')), replacement_chore_id INTEGER, replacement_member_id INTEGER, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feed_tokens(id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, token_hash TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS event_history(uid TEXT PRIMARY KEY, member_id INTEGER NOT NULL, event_date TEXT NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, payload_hash TEXT NOT NULL, payload TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0, last_modified TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS task_status(id INTEGER PRIMARY KEY, assignment_id INTEGER NOT NULL, member_id INTEGER NOT NULL, task_date TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','done','skipped')), updated_at TEXT NOT NULL, UNIQUE(assignment_id, member_id, task_date));
 CREATE INDEX IF NOT EXISTS idx_assignments ON assignments(member_id, weekday, week, active);
 CREATE INDEX IF NOT EXISTS idx_exceptions ON exceptions(exception_date);
 """
@@ -99,7 +100,8 @@ def resolve(conn, member_id, day):
                     name, description, suggested = replacement["name"], replacement["description"], replacement["suggested_time"]
             if e["note"]:
                 notes.append(e["note"])
-        result.append({"assignment_id": assignment["id"], "date": day.isoformat(), "week": week, "name": name, "description": description, "suggested_time": suggested, "notes": " ".join(notes)})
+        status = conn.execute("SELECT status FROM task_status WHERE assignment_id=? AND member_id=? AND task_date=?", (assignment["id"], member_id, day.isoformat())).fetchone()
+        result.append({"assignment_id": assignment["id"], "date": day.isoformat(), "week": week, "name": name, "description": description, "suggested_time": suggested, "notes": " ".join(notes), "status": status["status"] if status else "pending", "member_id": member_id})
     incoming = conn.execute("SELECT * FROM exceptions WHERE exception_date=? AND exception_type='swap' AND replacement_member_id=?", (day.isoformat(), member_id)).fetchall()
     for e in incoming:
         if not e["assignment_id"]:
@@ -107,7 +109,8 @@ def resolve(conn, member_id, day):
         assignment = conn.execute("""SELECT a.*, c.name chore_name, c.description chore_description, c.suggested_time chore_time
             FROM assignments a JOIN chores c ON c.id=a.chore_id WHERE a.id=? AND a.active=1""", (e["assignment_id"],)).fetchone()
         if assignment and assignment["member_id"] != member_id:
-            result.append({"assignment_id": assignment["id"], "date": day.isoformat(), "week": week, "name": assignment["chore_name"], "description": assignment["chore_description"], "suggested_time": assignment["chore_time"], "notes": e["note"] or assignment["notes"]})
+            status = conn.execute("SELECT status FROM task_status WHERE assignment_id=? AND member_id=? AND task_date=?", (assignment["id"], member_id, day.isoformat())).fetchone()
+            result.append({"assignment_id": assignment["id"], "date": day.isoformat(), "week": week, "name": assignment["chore_name"], "description": assignment["chore_description"], "suggested_time": assignment["chore_time"], "notes": e["note"] or assignment["notes"], "status": status["status"] if status else "pending", "member_id": member_id})
     return result
 
 def ical_escape(value):
@@ -122,12 +125,14 @@ def event_for(item, timezone_name):
     tz = ZoneInfo(timezone_name)
     start = datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz)
     end = start + timedelta(minutes=30)
-    description = "Suggested time: " + start.strftime("%H:%M")
+    hour = start.hour % 12 or 12
+    meridiem = "a. m." if start.hour < 12 else "p. m."
+    description = "Hora sugerida: alrededor de %d:%02d %s" % (hour, start.minute, meridiem)
     if item["description"]:
         description += "\n" + item["description"]
     if item["notes"]:
         description += "\nNote: " + item["notes"]
-    return {"uid": "chore-%s-%s@home.moralife.uk" % (item["assignment_id"], item["date"]), "start": start.isoformat(), "end": end.isoformat(), "title": "A little help: " + item["name"], "description": description}
+    return {"uid": "chore-%s-%s@home.moralife.uk" % (item["assignment_id"], item["date"]), "start": start.isoformat(), "end": end.isoformat(), "title": item["name"], "description": "Hoy te toca ayudar con %s. %s" % (item["name"], description)}
 
 def stamp(dt):
     return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -192,7 +197,7 @@ def create_app(test_config=None):
     networks = tuple(ipaddress.ip_network(x.strip()) for x in config["HOME_NETWORKS"].split(",") if x.strip())
     app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
     app.secret_key = config["SECRET_KEY"] or "test-secret"
-    app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=config["COOKIE_SECURE"], SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=timedelta(hours=12))
+    app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=config["COOKIE_SECURE"], SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=timedelta(days=60))
     if config["TRUST_PROXY"]: app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     limiter = Limiter()
     @app.before_request
@@ -253,6 +258,33 @@ def create_app(test_config=None):
         today = datetime.now(ZoneInfo(config["TIMEZONE"])).date()
         days = [{"date": (today + timedelta(days=i)).isoformat(), "label": (today + timedelta(days=i)).strftime("%A"), "items": resolve(db(), member["id"], today + timedelta(days=i))} for i in range(7)]
         return jsonify(member={"slug": member["slug"], "name": member["name"]}, today=days[0], tomorrow=days[1], week=days)
+    @app.get("/api/planner")
+    @family_required
+    def planner():
+        start = iso_date(request.args.get("start") or datetime.now(ZoneInfo(config["TIMEZONE"])).date().isoformat())
+        days = []
+        for offset in range(7):
+            day = start + timedelta(days=offset)
+            items = []
+            for member in db().execute("SELECT id,slug,name FROM members WHERE active=1 ORDER BY name").fetchall():
+                for item in resolve(db(), member["id"], day):
+                    item["member_slug"], item["member_name"] = member["slug"], member["name"]
+                    items.append(item)
+            days.append({"date": day.isoformat(), "label": day.strftime("%A"), "items": items})
+        return jsonify(start=start.isoformat(), week=days)
+    @app.post("/api/status")
+    @family_required
+    def task_status():
+        payload = request.get_json(silent=True) or {}
+        status = text(payload.get("status"))
+        if status not in ("pending", "done", "skipped"): return jsonify(error="invalid_status"), 400
+        day = iso_date(payload.get("date")); assignment_id = int(payload.get("assignment_id", 0))
+        member_slug = text(payload.get("member_slug")); member = db().execute("SELECT id FROM members WHERE slug=? AND active=1", (member_slug,)).fetchone()
+        if not member or not assignment_id: return jsonify(error="task_not_found"), 404
+        if not any(x["assignment_id"] == assignment_id for x in resolve(db(), member["id"], day)): return jsonify(error="task_not_found"), 404
+        with db():
+            db().execute("INSERT INTO task_status(assignment_id,member_id,task_date,status,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(assignment_id,member_id,task_date) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at", (assignment_id, member["id"], day.isoformat(), status, now_utc()))
+        return jsonify(ok=True, status=status)
     @app.post("/api/calendar-token/<member_slug>")
     @family_required
     def new_token(member_slug):
@@ -279,7 +311,52 @@ def create_app(test_config=None):
     @app.get("/api/admin/state")
     @admin_required
     def admin_state():
-        return jsonify(anchor_date=db().execute("SELECT value FROM settings WHERE key='anchor_date'").fetchone()[0], members=rows("SELECT * FROM members ORDER BY name"), chores=rows("SELECT * FROM chores ORDER BY name"), assignments=rows("SELECT a.*,m.name member_name,c.name chore_name FROM assignments a JOIN members m ON m.id=a.member_id JOIN chores c ON c.id=a.chore_id ORDER BY a.week,a.weekday,m.name"), exceptions=rows("SELECT e.*,m.name member_name FROM exceptions e LEFT JOIN members m ON m.id=e.member_id ORDER BY e.exception_date DESC,e.id DESC"))
+        return jsonify(anchor_date=db().execute("SELECT value FROM settings WHERE key='anchor_date'").fetchone()[0], schedule_version=db().execute("SELECT value FROM settings WHERE key='schedule_version'").fetchone()[0], members=rows("SELECT m.*, EXISTS(SELECT 1 FROM feed_tokens t WHERE t.member_id=m.id AND t.revoked_at IS NULL) calendar_active FROM members m ORDER BY name"), chores=rows("SELECT * FROM chores ORDER BY name"), assignments=rows("SELECT a.*,m.name member_name,c.name chore_name FROM assignments a JOIN members m ON m.id=a.member_id JOIN chores c ON c.id=a.chore_id ORDER BY a.week,a.weekday,m.name"), exceptions=rows("SELECT e.*,m.name member_name FROM exceptions e LEFT JOIN members m ON m.id=e.member_id ORDER BY e.exception_date DESC,e.id DESC"))
+
+    def validate_import(payload):
+        if not isinstance(payload, dict) or not isinstance(payload.get("members"), list) or not isinstance(payload.get("chores"), list) or not isinstance(payload.get("assignments"), list): raise ValueError("el formato de importación no es válido")
+        for item in payload["members"]:
+            if not text(item.get("name"), 80): raise ValueError("cada persona necesita un nombre")
+        for item in payload["chores"]:
+            if not text(item.get("name"), 120): raise ValueError("cada tarea necesita un nombre")
+        for item in payload["assignments"]:
+            if text(item.get("week")).upper() not in ("A", "B") or int(item.get("weekday", -1)) not in range(7): raise ValueError("hay una asignación con semana o día inválido")
+        return payload
+
+    def apply_import(payload):
+        validate_import(payload)
+        conn = db()
+        with conn:
+            member_ids = {}
+            for item in payload["members"]:
+                name = text(item["name"], 80); member_slug = slug(item.get("slug") or name)
+                conn.execute("INSERT INTO members(slug,name,created_at) VALUES(?,?,?) ON CONFLICT(slug) DO UPDATE SET name=excluded.name,active=1", (member_slug, name, now_utc()))
+                member_ids[member_slug] = conn.execute("SELECT id FROM members WHERE slug=?", (member_slug,)).fetchone()[0]
+            chore_ids = {}
+            for item in payload["chores"]:
+                name = text(item["name"], 120); key = slug(name)
+                conn.execute("INSERT INTO chores(name,description,suggested_time,created_at) SELECT ?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM chores WHERE name=? AND active=1)", (name, text(item.get("description")), text(item.get("suggested_time"), 10), now_utc(), name))
+                chore_ids[key] = conn.execute("SELECT id FROM chores WHERE name=? AND active=1 ORDER BY id LIMIT 1", (name,)).fetchone()[0]
+            for item in payload["assignments"]:
+                mid = member_ids.get(slug(item.get("member") or item.get("member_slug"))); cid = chore_ids.get(slug(item.get("chore") or item.get("chore_name")))
+                if not mid or not cid: raise ValueError("una asignación usa una persona o tarea inexistente")
+                values = (mid, cid, int(item["weekday"]), text(item["week"]).upper(), text(item.get("notes")), now_utc())
+                existing = conn.execute("SELECT id FROM assignments WHERE member_id=? AND chore_id=? AND weekday=? AND week=? AND active=1", values[:4]).fetchone()
+                if existing: conn.execute("UPDATE assignments SET notes=?,updated_at=? WHERE id=?", (values[4], values[5], existing[0]))
+                else: conn.execute("INSERT INTO assignments(member_id,chore_id,weekday,week,notes,updated_at) VALUES(?,?,?,?,?,?)", values)
+            bump(conn)
+        return {"members": len(member_ids), "chores": len(chore_ids), "assignments": len(payload["assignments"])}
+
+    @app.post("/api/admin/import-preview")
+    @admin_required
+    def import_preview():
+        payload = validate_import(request.get_json(silent=True) or {})
+        return jsonify(ok=True, preview={"members": payload["members"], "chores": payload["chores"], "assignments": payload["assignments"]})
+
+    @app.post("/api/admin/import-apply")
+    @admin_required
+    def import_apply():
+        return jsonify(ok=True, applied=apply_import(request.get_json(silent=True) or {}))
     @app.post("/api/admin/settings")
     @admin_required
     def admin_settings():
