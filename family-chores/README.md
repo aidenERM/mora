@@ -14,7 +14,7 @@ small private family chore system for home.moralife.uk.
     python -m family_chores.cli make-qr
     .venv/bin/flask --app 'family_chores:create_app()' run
 
-Open /admin, set the Week A anchor, then add people, chores, assignments, and exceptions.
+Open /admin to review the imported Spanish Week A / Week B plan. The planner uses one central resolver for dashboards, family view, task status, exceptions, and calendars.
 
 ## VPS deployment
 
@@ -37,7 +37,7 @@ Open /admin, set the Week A anchor, then add people, chores, assignments, and ex
     sudo nginx -t && sudo systemctl reload nginx
     sudo certbot --nginx -d home.moralife.uk
 
-The service listens only on 127.0.0.1:8787. SQLite is stored at /var/lib/home-moralife/chores.sqlite3. Backup it with:
+The service listens only on 127.0.0.1:8790. SQLite is stored at /var/lib/home-moralife/chores.sqlite3. Backup it with:
 
     sudo install -d -m 700 /var/backups/home-moralife
     sudo sqlite3 /var/lib/home-moralife/chores.sqlite3 ".backup '/var/backups/home-moralife/chores-$(date +%F).sqlite3'"
@@ -49,3 +49,4 @@ Configure SECRET_KEY, FAMILY_PASSWORD, ADMIN_PASSWORD, DATABASE_PATH, HOME_NETWO
 ## Cloudflare
 
 Add only: A record, name home, IPv4 109.205.176.230. Use DNS-only while nginx and certbot are being configured; proxy it later if desired. Do not change moralife.uk, www, or api.
+
