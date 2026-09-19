@@ -290,29 +290,113 @@ def weather_candidates(conn, config: dict) -> list[dict]:
         "longitude": config["WEATHER_LON"],
         "timezone": "auto",
         "forecast_days": 2,
-        "hourly": "precipitation_probability,precipitation,weather_code",
+        "hourly": "temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m",
     })
     raw = json.loads(_request("https://api.open-meteo.com/v1/forecast?" + params).decode("utf-8"))
     hourly = raw.get("hourly", {})
-    times = hourly.get("time", [])[:12]
-    probs = hourly.get("precipitation_probability", [])[:12]
-    rain = hourly.get("precipitation", [])[:12]
-    codes = hourly.get("weather_code", [])[:12]
+    lookahead = config.get("WEATHER_LOOKAHEAD_HOURS", 24)
+    times = (hourly.get("time") or [])[:lookahead]
+
+    def series(name: str, default):
+        values = list(hourly.get(name) or [])[:lookahead]
+        return values + [default] * max(0, len(times) - len(values))
+
+    temperatures = series("temperature_2m", None)
+    apparent = series("apparent_temperature", None)
+    probabilities = series("precipitation_probability", 0)
+    amounts = series("precipitation", 0)
+    codes = series("weather_code", 0)
+    winds = series("wind_speed_10m", 0)
+    rows = []
+    for index, when in enumerate(times):
+        try:
+            rows.append({
+                "when": str(when),
+                "temperature": float(temperatures[index]) if temperatures[index] is not None else None,
+                "apparent": float(apparent[index]) if apparent[index] is not None else None,
+                "probability": int(probabilities[index] or 0),
+                "amount": float(amounts[index] or 0),
+                "code": int(codes[index] or 0),
+                "wind": float(winds[index] or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+
     source = {"id": "weather:" + config["WEATHER_LABEL"].lower(), "kind": "weather", "label": config["WEATHER_LABEL"], "topic": "weather", "trust": "primary", "keywords": [], "always_relevant": True}
     state = get_source_state(conn, source["id"])
     initializing = not bool(state.get("initialized"))
     save_source_state(conn, source["id"], {"initialized": True})
+    if not rows:
+        return []
+
+    rain_codes = set(range(51, 68)) | set(range(80, 83))
+    storm_rows = [row for row in rows if row["code"] >= 95]
+    rain_rows = [row for row in rows if row["probability"] >= config["WEATHER_RAIN_PROBABILITY"] or row["amount"] >= config["WEATHER_RAIN_MM"] or row["code"] in rain_codes]
+    if rain_rows and all(row["code"] >= 95 for row in rain_rows):
+        rain_rows = []
+    hot_rows = [row for row in rows if (row["temperature"] is not None and row["temperature"] >= config["WEATHER_HOT_C"]) or (row["apparent"] is not None and row["apparent"] >= config["WEATHER_HOT_C"] + 2)]
+    cold_rows = [row for row in rows if (row["temperature"] is not None and row["temperature"] <= config["WEATHER_COLD_C"]) or (row["apparent"] is not None and row["apparent"] <= config["WEATHER_COLD_C"] - 2)]
+    wind_rows = [row for row in rows if row["wind"] >= config["WEATHER_WIND_KMH"]]
+    fog_rows = [row for row in rows if row["code"] in {45, 48}]
+    alerts = {
+        "storm": storm_rows,
+        "rain": rain_rows,
+        "hot": hot_rows,
+        "cold": cold_rows,
+        "wind": wind_rows,
+        "fog": fog_rows,
+    }
+    titles = {
+        "storm": "Thunderstorms possible",
+        "rain": "Rain likely",
+        "hot": "Hot weather expected",
+        "cold": "Cold weather expected",
+        "wind": "Strong wind possible",
+        "fog": "Fog possible",
+    }
+    scores = {"storm": 96, "rain": 86, "hot": 82, "cold": 82, "wind": 86, "fog": 80}
+    window = rows[0]["when"][:10]
     candidates = []
-    for when, probability, amount, code in zip(times, probs, rain, codes):
-        probability, amount, code = int(probability or 0), float(amount or 0), int(code or 0)
-        if probability < 70 and code < 51:
+    for category, matching in alerts.items():
+        if not matching:
             continue
-        severity = 94 if code >= 95 or probability >= 90 else 82
-        description = f"{probability}% precipitation probability near {when.replace('T', ' ')}"
-        if amount:
-            description += f"; forecast {amount:g} mm"
-        item = {"title": f"Weather may interrupt plans in {config['WEATHER_LABEL']}", "summary": description, "url": "https://open-meteo.com/en/docs", "guid": when + ":rain", "published_at": None}
-        candidates.append(_source_item(source, item, initial_suppress=initializing, score_override=severity))
+        earliest = matching[0]
+        peak_probability = max(row["probability"] for row in matching)
+        peak_amount = max(row["amount"] for row in matching)
+        peak_wind = max(row["wind"] for row in matching)
+        temperatures_seen = [row["temperature"] for row in matching if row["temperature"] is not None]
+        apparent_seen = [row["apparent"] for row in matching if row["apparent"] is not None]
+        time_text = earliest["when"].replace("T", " ")
+        if category == "storm":
+            summary = f"Thunderstorms possible from {time_text}; {peak_probability}% precipitation probability, up to {peak_amount:g} mm, wind up to {peak_wind:g} km/h."
+        elif category == "rain":
+            summary = f"Rain or showers possible from {time_text}; {peak_probability}% precipitation probability, up to {peak_amount:g} mm, wind up to {peak_wind:g} km/h."
+        elif category == "hot":
+            summary = f"Air temperature may reach {max(temperatures_seen or [0]):g}°C and feel like {max(apparent_seen or temperatures_seen or [0]):g}°C around {time_text}."
+        elif category == "cold":
+            summary = f"Air temperature may fall to {min(temperatures_seen or [0]):g}°C and feel like {min(apparent_seen or temperatures_seen or [0]):g}°C around {time_text}."
+        elif category == "wind":
+            summary = f"Wind may reach {peak_wind:g} km/h from {time_text}; precipitation probability is {peak_probability}%."
+        else:
+            summary = f"Low visibility or fog is possible from {time_text}; wind up to {peak_wind:g} km/h."
+        item = {
+            "title": f"{titles[category]} near {config['WEATHER_LABEL']}",
+            "summary": summary,
+            "url": "https://open-meteo.com/en/docs",
+            "guid": f"{window}:{category}",
+            "published_at": None,
+        }
+        candidate = _source_item(source, item, initial_suppress=initializing, score_override=scores[category])
+        candidate["body"] = f"forecast weather alert: {category}; checked {config['WEATHER_LOOKAHEAD_HOURS']}-hour outlook"
+        candidate["metadata"].update({
+            "weather_category": category,
+            "alert_window": window,
+            "lookahead_hours": config["WEATHER_LOOKAHEAD_HOURS"],
+            "peak_precipitation_probability": peak_probability,
+            "peak_precipitation_mm": round(peak_amount, 1),
+            "peak_wind_kmh": round(peak_wind, 1),
+        })
+        candidates.append(candidate)
     return candidates
 
 

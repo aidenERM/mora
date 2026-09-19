@@ -8,7 +8,7 @@ from pathlib import Path
 from werkzeug.security import generate_password_hash
 
 from pulse_app.app import create_app
-from pulse_app import discovery
+from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import is_quiet_hours, score_item
 from pulse_app.sources import parse_feed
@@ -190,3 +190,37 @@ def test_discovery_settings_feedback_and_github_webhook(tmp_path):
     duplicate = client.post("/api/webhooks/github", data=raw, headers={**headers, "Content-Type": "application/json"})
     assert duplicate.status_code == 200
     assert duplicate.json["duplicate"] is True
+
+
+def test_weather_alerts_cover_rain_storm_heat_cold_and_wind(tmp_path, monkeypatch):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({
+        "DATABASE_PATH": str(database),
+        "WEATHER_LABEL": "La Ceja, Antioquia",
+        "WEATHER_LOOKAHEAD_HOURS": 24,
+        "WEATHER_HOT_C": 28,
+        "WEATHER_COLD_C": 12,
+        "WEATHER_RAIN_PROBABILITY": 60,
+        "WEATHER_RAIN_MM": 2,
+        "WEATHER_WIND_KMH": 40,
+    })
+    forecast = {
+        "hourly": {
+            "time": ["2026-09-19T10:00", "2026-09-19T11:00", "2026-09-19T12:00"],
+            "temperature_2m": [29, 13, 22],
+            "apparent_temperature": [31, 10, 22],
+            "precipitation_probability": [70, 95, 0],
+            "precipitation": [3, 8, 0],
+            "weather_code": [61, 95, 0],
+            "wind_speed_10m": [20, 45, 50],
+        }
+    }
+    monkeypatch.setattr(sources, "_request", lambda url, headers=None: json.dumps(forecast).encode())
+    candidates = sources.weather_candidates(conn, config)
+    categories = {item["metadata"]["weather_category"] for item in candidates}
+    assert {"rain", "storm", "hot", "cold", "wind"}.issubset(categories)
+    rain = next(item for item in candidates if item["metadata"]["weather_category"] == "rain")
+    assert "precipitation probability" in rain["summary"]
+    assert rain["metadata"]["source_trust"] == "primary"
