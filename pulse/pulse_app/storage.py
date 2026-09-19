@@ -103,6 +103,26 @@ def default_preferences(config: dict) -> dict:
     }
 
 
+def passive_topic_weights(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        """SELECT events.topic,
+                  SUM(CASE WHEN event_actions.action='delivered' THEN 1 ELSE 0 END) AS delivered,
+                  SUM(CASE WHEN event_actions.action='opened' THEN 1 ELSE 0 END) AS opened
+           FROM event_actions JOIN events ON events.id=event_actions.event_id
+           WHERE event_actions.action IN ('delivered','opened')
+           GROUP BY events.topic"""
+    ).fetchall()
+    weights = {}
+    for row in rows:
+        delivered = int(row["delivered"] or 0)
+        opened = int(row["opened"] or 0)
+        if delivered < 3:
+            continue
+        ratio = opened / delivered
+        weights[row["topic"]] = max(-6, min(6, round((ratio - 0.5) * 12)))
+    return weights
+
+
 def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     row = conn.execute("SELECT value FROM settings WHERE key='preferences'").fetchone()
     stored = {}
@@ -115,8 +135,10 @@ def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     base.update({key: value for key, value in stored.items() if key in base})
     base["topic_thresholds"] = {**base["topic_thresholds"], **stored.get("topic_thresholds", {})}
     base["muted_topics"] = stored.get("muted_topics", {})
-    for key in ("followed_entities", "less_like_entities", "less_like_topics", "learned_topic_weights"):
+    for key in ("followed_entities", "less_like_entities", "less_like_topics"):
         base[key] = stored.get(key, {}) if isinstance(stored.get(key, {}), dict) else {}
+    stored_weights = stored.get("learned_topic_weights", {}) if isinstance(stored.get("learned_topic_weights", {}), dict) else {}
+    base["learned_topic_weights"] = {**passive_topic_weights(conn), **stored_weights}
     return base
 
 
@@ -220,7 +242,7 @@ def clear_learning(conn: sqlite3.Connection) -> None:
         "INSERT INTO settings(key,value) VALUES('preferences',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (json.dumps(preferences, separators=(",", ":")),),
     )
-    conn.execute("DELETE FROM event_actions WHERE action IN ('follow', 'less_like', 'opened', 'source_clicked')")
+    conn.execute("DELETE FROM event_actions WHERE action IN ('follow', 'less_like', 'opened', 'source_clicked', 'delivered')")
     conn.commit()
 
 

@@ -263,6 +263,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             followed_entities=preferences.get("followed_entities", {}),
             less_like_entities=preferences.get("less_like_entities", {}),
             less_like_topics=preferences.get("less_like_topics", {}),
+            learned_topic_weights=preferences.get("learned_topic_weights", {}),
         )
 
     @app.delete("/api/learning")
