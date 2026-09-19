@@ -39,6 +39,19 @@ def test_auth_and_health(tmp_path):
     assert client.get("/api/events").json["events"] == []
 
 
+def test_change_password_replaces_old_password(tmp_path):
+    client = make_client(tmp_path)
+    login(client)
+    changed = client.post(
+        "/api/auth/password",
+        json={"current_password": "test-password", "new_password": "new-short-password", "confirm_password": "new-short-password"},
+    )
+    assert changed.status_code == 200
+    client.post("/api/auth/logout")
+    assert client.post("/api/auth/login", json={"password": "test-password"}).status_code == 401
+    assert client.post("/api/auth/login", json={"password": "new-short-password"}).status_code == 200
+
+
 def test_subscription_validation_and_preferences(tmp_path):
     client = make_client(tmp_path)
     login(client)

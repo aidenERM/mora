@@ -83,6 +83,7 @@ h3 { margin: .7rem 0 .4rem; font-size: 1.02rem; line-height: 1.25; letter-spacin
 .rules-card summary strong { display: block; margin-top: .35rem; font-size: .96rem; }
 .chevron { color: var(--muted); font-size: 1.3rem; }
 .rules-body { padding: 0 1.2rem 1.2rem; }
+.password-form { display: grid; gap: .75rem; }
 .time-row { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; margin-bottom: 1.2rem; }
 label { display: grid; gap: .4rem; color: var(--muted); font-size: .82rem; }
 input { min-height: 44px; padding: .65rem .75rem; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: #0a101b; outline: none; }

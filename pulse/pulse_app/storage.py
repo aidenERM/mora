@@ -68,11 +68,13 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def init_db(path: str | Path) -> None:
+def init_db(path: str | Path, initial_password_hash: str = "") -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('preferences',?)", (json.dumps({}),))
+        if initial_password_hash:
+            conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash',?)", (initial_password_hash,))
         conn.commit()
     finally:
         conn.close()
@@ -108,6 +110,19 @@ def save_preferences(conn: sqlite3.Connection, preferences: dict) -> None:
     conn.execute(
         "INSERT INTO settings(key,value) VALUES('preferences',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (json.dumps(preferences, separators=(",", ":")),),
+    )
+    conn.commit()
+
+
+def get_password_hash(conn: sqlite3.Connection, fallback: str = "") -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key='password_hash'").fetchone()
+    return str(row[0]) if row and row[0] else fallback
+
+
+def save_password_hash(conn: sqlite3.Connection, password_hash: str) -> None:
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES('password_hash',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (password_hash,),
     )
     conn.commit()
 

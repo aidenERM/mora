@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, make_response, request, send_from_directory, session
 from werkzeug.middleware.proxy_fix import ProxyFix
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import STATIC, TOPIC_LABELS, load_config
 from .push import configured as push_configured, send_payload
@@ -19,8 +19,10 @@ from .storage import (
     get_event,
     get_preferences,
     init_db,
+    get_password_hash,
     list_events,
     mark_clicked,
+    save_password_hash,
     save_preferences,
     save_subscription,
     set_reminder,
@@ -50,7 +52,7 @@ def _valid_time(value: str) -> bool:
 
 def create_app(test_config: dict | None = None) -> Flask:
     config = load_config(test_config)
-    init_db(config["DATABASE_PATH"])
+    init_db(config["DATABASE_PATH"], config["PASSWORD_HASH"])
     app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
     app.secret_key = config["SECRET_KEY"] or config["SESSION_SECRET"]
     app.config.update(
@@ -75,6 +77,9 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     def auth_enabled() -> bool:
         return bool(config["PASSWORD_HASH"]) and not (config["ENV"] != "production" and config.get("DEV_NO_AUTH"))
+
+    def active_password_hash() -> str:
+        return get_password_hash(db(), config["PASSWORD_HASH"])
 
     def require_auth(view):
         @wraps(view)
@@ -131,11 +136,34 @@ def create_app(test_config: dict | None = None) -> Flask:
             session["pulse_authenticated"] = True
             return jsonify(ok=True)
         password = str(_json_body().get("password", ""))
-        if not password or not check_password_hash(config["PASSWORD_HASH"], password):
+        if not password or not check_password_hash(active_password_hash(), password):
             return jsonify(error="invalid_credentials"), 401
         session.clear()
         session.permanent = True
         session["pulse_authenticated"] = True
+        return jsonify(ok=True)
+
+    @app.post("/api/auth/password")
+    @require_auth
+    def change_password():
+        body = _json_body()
+        current = body.get("current_password")
+        new = body.get("new_password")
+        confirmation = body.get("confirm_password")
+        if not all(isinstance(value, str) for value in (current, new, confirmation)):
+            return jsonify(error="invalid_password"), 400
+        if len(new) < 8:
+            return jsonify(error="password_too_short"), 400
+        if len(new) > 256:
+            return jsonify(error="password_too_long"), 400
+        if new != confirmation:
+            return jsonify(error="password_confirmation_mismatch"), 400
+        current_hash = active_password_hash()
+        if not current_hash or not check_password_hash(current_hash, current):
+            return jsonify(error="invalid_current_password"), 400
+        if check_password_hash(current_hash, new):
+            return jsonify(error="password_unchanged"), 400
+        save_password_hash(db(), generate_password_hash(new))
         return jsonify(ok=True)
 
     @app.post("/api/auth/logout")

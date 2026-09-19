@@ -145,10 +145,14 @@ function rulesCard() {
   return `<details class="rules-card"><summary><span><span class="eyebrow">rules</span><strong>quiet hours and relevance</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><div class="time-row"><label>quiet from<input id="quiet-start" type="time" value="${escapeHtml(prefs.quiet_start)}"></label><label>until<input id="quiet-end" type="time" value="${escapeHtml(prefs.quiet_end)}"></label></div><div class="thresholds"><p class="field-note">notify only when a topic reaches its threshold</p>${thresholdRows}</div><button class="button secondary full" data-action="save-rules">save rules</button></div></details>`;
 }
 
+function passwordCard() {
+  return `<details class="rules-card password-card"><summary><span><span class="eyebrow">security</span><strong>change passphrase</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><form id="password-form" class="password-form"><label for="current-password">current passphrase<input id="current-password" name="current_password" type="password" autocomplete="current-password" minlength="8" required></label><label for="new-password">new passphrase<input id="new-password" name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label><label for="confirm-password">confirm new passphrase<input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label><button class="button secondary full" type="submit">change passphrase</button><p class="fine-print">minimum 8 characters · the old passphrase stops working after this succeeds</p></form></div></details>`;
+}
+
 function renderHome() {
   document.title = "Pulse · quiet signals";
   const events = state.events.length ? state.events.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -194,8 +198,21 @@ async function bootstrap() {
 }
 
 document.addEventListener("submit", async (event) => {
-  if (event.target.id !== "login-form") return;
   event.preventDefault();
+  if (event.target.id === "password-form") {
+    const form = event.target;
+    const values = Object.fromEntries(new FormData(form).entries());
+    try {
+      await api("/api/auth/password", { method: "POST", body: JSON.stringify(values) });
+      form.reset();
+      showToast("passphrase changed");
+    } catch (error) {
+      const message = { invalid_current_password: "current passphrase is incorrect", password_confirmation_mismatch: "the new passphrases do not match", password_too_short: "use at least 8 characters", password_too_long: "use 256 characters or fewer", password_unchanged: "choose a different passphrase" }[error.message] || error.message;
+      showToast(message, true);
+    }
+    return;
+  }
+  if (event.target.id !== "login-form") return;
   const password = new FormData(event.target).get("password");
   try {
     await api("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
