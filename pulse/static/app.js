@@ -5,6 +5,8 @@ const state = {
   preferences: null,
   subscription: false,
   detail: null,
+  serviceWorkerRegistration: null,
+  serviceWorkerReady: null,
 };
 
 const app = document.querySelector("#app");
@@ -56,19 +58,38 @@ function urlBase64ToUint8Array(value) {
 }
 
 async function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) return;
+  if (!("serviceWorker" in navigator) || typeof navigator.serviceWorker.register !== "function") return null;
   try {
-    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    state.serviceWorkerRegistration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    return state.serviceWorkerRegistration;
   } catch (error) {
     console.warn("service worker unavailable", error);
+    return null;
+  }
+}
+
+async function getPushManager() {
+  if (!("serviceWorker" in navigator) || !state.config?.vapid_public_key || !state.serviceWorkerReady) return null;
+  try {
+    const registration = state.serviceWorkerRegistration || await state.serviceWorkerReady;
+    if (!registration?.pushManager) return null;
+    return registration.pushManager;
+  } catch (error) {
+    console.warn("push manager unavailable", error);
+    return null;
   }
 }
 
 async function checkSubscription() {
-  if (!("serviceWorker" in navigator) || !state.config?.vapid_public_key) return false;
-  const registration = await navigator.serviceWorker.ready;
-  const subscription = await registration.pushManager.getSubscription();
-  state.subscription = Boolean(subscription);
+  const pushManager = await getPushManager();
+  if (!pushManager || typeof pushManager.getSubscription !== "function") return false;
+  try {
+    const subscription = await pushManager.getSubscription();
+    state.subscription = Boolean(subscription);
+  } catch (error) {
+    console.warn("push subscription unavailable", error);
+    state.subscription = false;
+  }
   return state.subscription;
 }
 
@@ -81,18 +102,22 @@ async function enableAlerts() {
     showToast("On iPhone, add Pulse to the Home Screen first.", true);
     return;
   }
-  if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+  if (!("Notification" in window) || typeof Notification.requestPermission !== "function") {
     showToast("This browser does not support web push.", true);
     return;
   }
   try {
+    const pushManager = await getPushManager();
+    if (!pushManager || typeof pushManager.subscribe !== "function") {
+      showToast(isIOS() ? "Open Pulse from the Home Screen app to enable alerts." : "This browser does not support web push.", true);
+      return;
+    }
     const permission = await Notification.requestPermission();
     if (permission !== "granted") {
       showToast("Notifications remain off.", true);
       return;
     }
-    const registration = await navigator.serviceWorker.ready;
-    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(state.config.vapid_public_key) });
+    const subscription = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(state.config.vapid_public_key) });
     await api("/api/subscriptions", { method: "POST", body: JSON.stringify(subscription) });
     state.subscription = true;
     renderHome();
@@ -256,5 +281,5 @@ document.addEventListener("input", (event) => {
 });
 
 window.addEventListener("popstate", render);
-registerServiceWorker();
+state.serviceWorkerReady = registerServiceWorker();
 bootstrap();
