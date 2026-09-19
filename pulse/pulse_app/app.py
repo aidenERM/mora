@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import logging
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -12,21 +14,32 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import STATIC, TOPIC_LABELS, load_config
 from .push import configured as push_configured, send_payload
+from .rules import apply_preference_adjustments, should_notify
+from .sources import github_webhook_candidate
 from .storage import (
     connect,
+    clear_learning,
     create_manual_event,
     delete_subscription,
+    event_action_summary,
     get_event,
     get_preferences,
+    get_source_state,
     init_db,
     get_password_hash,
+    learning_metrics,
     list_events,
     mark_clicked,
+    record_event_action,
+    runtime_config,
     save_password_hash,
+    save_json_setting,
+    save_source_state,
     save_preferences,
     save_subscription,
     set_reminder,
     clear_reminder,
+    upsert_event,
 )
 from .worker import _payload
 
@@ -122,6 +135,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             vapid_public_key=config["VAPID_PUBLIC_KEY"],
             push_configured=push_configured(config),
             auth_configured=auth_enabled(),
+            discovery={"enabled": bool(config.get("BRAVE_SEARCH_API_KEY")), "interval_minutes": config["DISCOVERY_INTERVAL_MINUTES"]},
             topics=[{"id": key, "label": TOPIC_LABELS.get(key, key)} for key in config["TOPIC_THRESHOLDS"]],
             ios={"minimum_version": "16.4", "requires_home_screen": True},
         )
@@ -171,6 +185,92 @@ def create_app(test_config: dict | None = None) -> Flask:
         session.clear()
         return jsonify(ok=True)
 
+    @app.get("/api/discovery")
+    @require_auth
+    def discovery_settings():
+        active = runtime_config(db(), config)
+        return jsonify(
+            enabled=bool(config.get("BRAVE_SEARCH_API_KEY")),
+            interval_minutes=config["DISCOVERY_INTERVAL_MINUTES"],
+            profiles=active["SEARCH_PROFILES"],
+            entities=active["TRACKED_ENTITIES"],
+        )
+
+    @app.put("/api/discovery")
+    @require_auth
+    def discovery_settings_update():
+        body = _json_body()
+        active = runtime_config(db(), config)
+        for key, setting_key in (("profiles", "search_profiles"), ("entities", "tracked_entities")):
+            if key not in body:
+                continue
+            value = body[key]
+            if not isinstance(value, list) or len(value) > 30:
+                return jsonify(error=f"invalid_{key}"), 400
+            cleaned = []
+            for item in value:
+                if not isinstance(item, dict):
+                    return jsonify(error=f"invalid_{key}"), 400
+                item_id = str(item.get("id", "")).strip()[:80]
+                name = str(item.get("label" if key == "profiles" else "name", "")).strip()[:120]
+                topic = str(item.get("topic", "watcher")).strip()
+                if not item_id or not name or topic not in TOPIC_LABELS:
+                    return jsonify(error=f"invalid_{key}"), 400
+                if key == "profiles":
+                    queries = item.get("queries")
+                    keywords = item.get("keywords", [])
+                    if not isinstance(queries, list) or not 1 <= len(queries) <= 20 or not isinstance(keywords, list):
+                        return jsonify(error="invalid_profiles"), 400
+                    queries = [str(query).strip()[:300] for query in queries if str(query).strip()]
+                    if not queries:
+                        return jsonify(error="invalid_profiles"), 400
+                    cleaned.append({
+                        "id": item_id,
+                        "label": name,
+                        "topic": topic,
+                        "queries": queries[:20],
+                        "keywords": [str(word).strip()[:80] for word in keywords if str(word).strip()][:40],
+                        "active": bool(item.get("active", True)),
+                    })
+                else:
+                    aliases = item.get("aliases") or [name]
+                    if not isinstance(aliases, list):
+                        return jsonify(error="invalid_entities"), 400
+                    try:
+                        boost = max(0, min(40, int(item.get("boost", 0))))
+                    except (TypeError, ValueError):
+                        return jsonify(error="invalid_entities"), 400
+                    cleaned.append({
+                        "id": item_id,
+                        "name": name,
+                        "aliases": [str(alias).strip()[:120] for alias in aliases if str(alias).strip()][:20],
+                        "topic": topic,
+                        "boost": boost,
+                    })
+            if not cleaned:
+                return jsonify(error=f"invalid_{key}"), 400
+            save_json_setting(db(), setting_key, cleaned)
+            active["SEARCH_PROFILES" if key == "profiles" else "TRACKED_ENTITIES"] = cleaned
+        return jsonify(profiles=active["SEARCH_PROFILES"], entities=active["TRACKED_ENTITIES"])
+
+    @app.get("/api/learning")
+    @require_auth
+    def learning():
+        preferences = get_preferences(db(), config)
+        return jsonify(
+            summary=event_action_summary(db()),
+            metrics=learning_metrics(db()),
+            followed_entities=preferences.get("followed_entities", {}),
+            less_like_entities=preferences.get("less_like_entities", {}),
+            less_like_topics=preferences.get("less_like_topics", {}),
+        )
+
+    @app.delete("/api/learning")
+    @require_auth
+    def learning_reset():
+        clear_learning(db())
+        return jsonify(ok=True)
+
     @app.get("/api/events")
     @require_auth
     def events():
@@ -197,6 +297,50 @@ def create_app(test_config: dict | None = None) -> Flask:
         db().commit()
         return jsonify(ok=True)
 
+    @app.post("/api/events/<event_id>/source-clicked")
+    @require_auth
+    def event_source_clicked(event_id: str):
+        event = get_event(db(), event_id)
+        if not event:
+            return jsonify(error="not_found"), 404
+        record_event_action(db(), event_id, "source_clicked", event.get("url", ""))
+        db().commit()
+        return jsonify(ok=True)
+
+    @app.post("/api/events/<event_id>/feedback")
+    @require_auth
+    def event_feedback(event_id: str):
+        event = get_event(db(), event_id)
+        if not event:
+            return jsonify(error="not_found"), 404
+        body = _json_body()
+        action = body.get("action")
+        metadata = event.get("metadata") or {}
+        entity_ids = set(metadata.get("entities") or [])
+        entity_id = str(body.get("entity_id", "")).strip()
+        if action == "follow":
+            if entity_id not in entity_ids:
+                return jsonify(error="unknown_entity"), 400
+            prefs = get_preferences(db(), config)
+            prefs["followed_entities"][entity_id] = _now().isoformat()
+            save_preferences(db(), prefs)
+            record_event_action(db(), event_id, "follow", entity_id)
+        elif action == "less_like":
+            prefs = get_preferences(db(), config)
+            if entity_id:
+                if entity_id not in entity_ids:
+                    return jsonify(error="unknown_entity"), 400
+                prefs["less_like_entities"][entity_id] = _now().isoformat()
+                record_event_action(db(), event_id, "less_like", entity_id)
+            else:
+                prefs["less_like_topics"][event["topic"]] = _now().isoformat()
+                record_event_action(db(), event_id, "less_like", event["topic"])
+            save_preferences(db(), prefs)
+        else:
+            return jsonify(error="invalid_feedback"), 400
+        db().commit()
+        return jsonify(ok=True, preferences=get_preferences(db(), config))
+
     @app.post("/api/events/<event_id>/remind")
     @require_auth
     def event_remind(event_id: str):
@@ -210,6 +354,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         event = set_reminder(db(), event_id, minutes)
         if not event:
             return jsonify(error="not_found"), 404
+        record_event_action(db(), event_id, "remind", str(minutes))
+        db().commit()
         return jsonify(event=event)
 
     @app.delete("/api/events/<event_id>/remind")
@@ -218,6 +364,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         if not get_event(db(), event_id):
             return jsonify(error="not_found"), 404
         clear_reminder(db(), event_id)
+        record_event_action(db(), event_id, "remind_clear")
+        db().commit()
         return jsonify(ok=True)
 
     @app.get("/api/preferences")
@@ -269,6 +417,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             prefs["muted_topics"][topic] = (_now() + timedelta(days=days)).isoformat()
         else:
             return jsonify(error="invalid_days"), 400
+        record_event_action(db(), "topic:" + topic, "mute" if days else "unmute", str(days))
         save_preferences(db(), prefs)
         return jsonify(preferences=prefs)
 
@@ -313,6 +462,48 @@ def create_app(test_config: dict | None = None) -> Flask:
             events=[item for item in pending if item["priority"] in {"critical", "high"}],
             preferences={"quiet_start": prefs["quiet_start"], "quiet_end": prefs["quiet_end"]},
         )
+
+    @app.post("/api/webhooks/github")
+    def github_webhook():
+        secret = config.get("GITHUB_WEBHOOK_SECRET", "")
+        if not secret:
+            return jsonify(error="github_webhook_not_configured"), 503
+        raw = request.get_data(cache=True)
+        supplied = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(supplied, expected):
+            return jsonify(error="invalid_signature"), 401
+        delivery = request.headers.get("X-GitHub-Delivery", "").strip()
+        event_type = request.headers.get("X-GitHub-Event", "").strip()
+        if not delivery or not event_type:
+            return jsonify(error="missing_github_headers"), 400
+        delivery_key = "github:webhook:delivery:" + delivery
+        if get_source_state(db(), delivery_key):
+            return jsonify(ok=True, duplicate=True)
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="invalid_json"), 400
+        candidate = github_webhook_candidate(payload, event_type, config)
+        save_source_state(db(), delivery_key, {"event": event_type, "received_at": _now().isoformat()})
+        if not candidate:
+            db().commit()
+            return jsonify(ok=True, ignored=True)
+        preferences = get_preferences(db(), config)
+        apply_preference_adjustments(candidate, preferences)
+        candidate["created_from"] = "github_webhook"
+        event, created = upsert_event(db(), candidate)
+        db().commit()
+        delivered = False
+        if created:
+            allowed, _reason = should_notify(event, preferences)
+            if allowed:
+                result = send_payload(db(), config, _payload(config, event))
+                if result.get("sent", 0):
+                    record_event_action(db(), event["id"], "delivered", str(result["sent"]))
+                    delivered = True
+                db().execute("UPDATE events SET notified_at=? WHERE id=?", (_now().isoformat(), event["id"]))
+                db().commit()
+        return jsonify(ok=True, created=created, delivered=delivered, event_id=event["id"])
 
     @app.get("/manifest.webmanifest")
     def manifest():

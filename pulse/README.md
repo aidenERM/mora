@@ -27,7 +27,13 @@ For Windows PowerShell, use `$env:PULSE_DEV_NO_AUTH='1'` instead of the inline e
 4. tap **enable alerts** from inside the installed web app.
 5. tap **send test**. The server creates one event, sends one Web Push payload, and the service worker opens `/event/<id>` when the notification is tapped.
 
-The worker checks weather, the official Apple Newsroom feed, the official Call of Duty blog URL, a Colombia RSS search feed, configured GitHub repositories, and optional custom RSS/URL watchers. The first successful source check seeds history without sending a notification for every old item.
+The worker keeps a 15-minute cadence for direct watchers: La Ceja weather, the official Apple Newsroom feed, the official Call of Duty blog URL, a Colombia RSS search feed, configured GitHub repositories, and optional custom RSS/URL watchers. The first successful source check seeds history without sending a notification for every old item.
+
+Optional discovery uses Brave Search server-side. It runs on its own slower cadence, three hours by default, and can run a short contextual search when a high-priority watcher changes. Every promising result is fetched and read before it becomes an event. Results keep source trust (`primary`, `reliable_secondary`, or `community`), confidence (`confirmed`, `likely`, or `rumor`), the source list, publication time when available, and matched tracked entities. A single community rumor is retained as history but suppressed from notification.
+
+Set `PULSE_BRAVE_SEARCH_API_KEY` to enable it. The key is never returned by the API or sent to the PWA. Profiles and tracked entities can be edited inside Pulse settings after the first deployment; environment JSON is available as a server-side fallback. Discovery is intentionally disabled when the key is blank.
+
+For repositories you control, set `PULSE_GITHUB_WEBHOOK_SECRET` and configure GitHub to send signed `push`, `release`, `issues`, and `pull_request` deliveries to `https://pulse.moralife.uk/api/webhooks/github`. Pulse validates the signature, ignores repositories outside `PULSE_GITHUB_REPOS`, deduplicates delivery IDs, and keeps the 15-minute GitHub release watcher as a fallback.
 
 ## production deployment
 

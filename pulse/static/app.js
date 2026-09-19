@@ -3,6 +3,8 @@ const state = {
   authenticated: false,
   events: [],
   preferences: null,
+  discovery: null,
+  learning: null,
   subscription: false,
   detail: null,
   serviceWorkerRegistration: null,
@@ -128,9 +130,11 @@ async function enableAlerts() {
 }
 
 async function loadAuthenticatedState() {
-  const [events, preferences] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences")]);
+  const [events, preferences, discovery, learning] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
+  state.discovery = discovery;
+  state.learning = learning;
   await checkSubscription();
 }
 
@@ -156,11 +160,12 @@ function alertCard() {
 }
 
 function eventCard(event) {
+  const confidence = event.metadata?.confidence || "direct";
   return `<button class="event-card" data-event-id="${escapeHtml(event.id)}">
     <div class="event-card-top"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span class="event-time">${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></div>
     <h3>${escapeHtml(event.title)}</h3>
     <p>${escapeHtml(event.summary || event.body || "Open for details")}</p>
-    <div class="event-card-bottom"><span class="priority priority-${escapeHtml(event.priority)}">${escapeHtml(event.priority)}</span><span class="score">${event.score}/100</span></div>
+    <div class="event-card-bottom"><span class="priority priority-${escapeHtml(event.priority)}">${escapeHtml(event.priority)}</span><span class="confidence confidence-${escapeHtml(confidence)}">${escapeHtml(confidence)}</span><span class="score">${event.score}/100</span></div>
   </button>`;
 }
 
@@ -174,10 +179,44 @@ function passwordCard() {
   return `<details class="rules-card password-card"><summary><span><span class="eyebrow">security</span><strong>change passphrase</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><form id="password-form" class="password-form"><label for="current-password">current passphrase<input id="current-password" name="current_password" type="password" autocomplete="current-password" minlength="8" required></label><label for="new-password">new passphrase<input id="new-password" name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label><label for="confirm-password">confirm new passphrase<input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label><button class="button secondary full" type="submit">change passphrase</button><p class="fine-print">minimum 8 characters · the old passphrase stops working after this succeeds</p></form></div></details>`;
 }
 
+function discoveryCard() {
+  const discovery = state.discovery || { enabled: false, interval_minutes: 180, profiles: [], entities: [] };
+  const profiles = escapeHtml(JSON.stringify(discovery.profiles || [], null, 2));
+  const entities = escapeHtml(JSON.stringify(discovery.entities || [], null, 2));
+  const status = discovery.enabled ? `broad search every ${discovery.interval_minutes} minutes` : "direct watchers only · add a Brave key on the server to enable search";
+  return `<details class="rules-card discovery-card"><summary><span><span class="eyebrow">discovery</span><strong>search profiles and tracked things</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">${escapeHtml(status)}. these settings are stored in Pulse and never include the search key.</p><label for="profiles-json">search profiles <textarea id="profiles-json" rows="12" spellcheck="false">${profiles}</textarea></label><label for="entities-json">tracked entities <textarea id="entities-json" rows="12" spellcheck="false">${entities}</textarea></label><button class="button secondary full" data-action="save-discovery">save discovery settings</button><p class="fine-print">advanced editor: profiles need id, label, topic, queries, keywords, active. entities need id, name, aliases, topic, boost.</p></div></details>`;
+}
+
+function learningCard() {
+  const summary = state.learning?.summary || {};
+  const metrics = state.learning?.metrics || {};
+  const followed = Object.keys(state.learning?.followed_entities || {}).length;
+  const lessLike = Object.keys(state.learning?.less_like_entities || {}).length + Object.keys(state.learning?.less_like_topics || {}).length;
+  const average = metrics.average_time_to_open_seconds == null ? "—" : `${Math.round(metrics.average_time_to_open_seconds / 60)}m`;
+  return `<details class="rules-card"><summary><span><span class="eyebrow">feedback</span><strong>what Pulse is learning</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">explicit follow and less-like choices change scoring. opening and source clicks are recorded as signals.</p><div class="learning-stats"><span><strong>${Number(summary.delivered || 0)}</strong> delivered</span><span><strong>${Number(summary.opened || 0)}</strong> opened</span><span><strong>${followed}</strong> followed</span><span><strong>${lessLike}</strong> less like</span></div><p class="fine-print">average time to open: ${average} · delivered but not opened: ${Number(metrics.delivered_not_opened || 0)}</p><button class="button ghost-button full" data-action="reset-learning">reset feedback history</button></div></details>`;
+}
+
+function detailQuality(event) {
+  const metadata = event.metadata || {};
+  const confidence = metadata.confidence || "direct";
+  const sources = Array.isArray(metadata.sources) ? metadata.sources : [];
+  const sourceLinks = sources.map((source) => `<a class="source-row" data-action="source-click" data-event-id="${escapeHtml(event.id)}" href="${escapeHtml(source.url || event.url)}" target="_blank" rel="noreferrer"><span>${escapeHtml(source.title || source.url || "source")}</span><span>${escapeHtml(source.trust || "source")}</span></a>`).join("");
+  const tracked = (metadata.entity_names || []).filter(Boolean).join(", ");
+  return `<div class="quality-card"><span class="eyebrow">evidence quality</span><div class="quality-row"><span class="confidence confidence-${escapeHtml(confidence)}">${escapeHtml(confidence)}</span><span class="muted">${sources.length || 1} source${sources.length === 1 ? "" : "s"}</span><span class="muted">${escapeHtml(metadata.verification || "direct watcher")}</span></div>${tracked ? `<p class="fine-print">tracked: ${escapeHtml(tracked)}</p>` : ""}${sourceLinks ? `<div class="source-list">${sourceLinks}</div>` : ""}</div>`;
+}
+
+function detailFeedback(event) {
+  const metadata = event.metadata || {};
+  const ids = metadata.entities || [];
+  const names = metadata.entity_names || [];
+  const followButtons = ids.map((id, index) => `<button class="button ghost-button" data-action="follow" data-event-id="${escapeHtml(event.id)}" data-entity-id="${escapeHtml(id)}">follow ${escapeHtml(names[index] || id)}</button>`).join("");
+  return `<div class="feedback-row">${followButtons}<button class="button ghost-button" data-action="less-like" data-event-id="${escapeHtml(event.id)}">less like this</button></div>`;
+}
+
 function renderHome() {
   document.title = "Pulse · quiet signals";
   const events = state.events.length ? state.events.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}${discoveryCard()}${learningCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -190,7 +229,7 @@ async function renderDetail(eventId) {
     if (!event) throw new Error("event not found");
     await api(`/api/events/${encodeURIComponent(event.id)}/opened`, { method: "POST", body: "{}" }).catch(() => {});
     document.title = `${event.title} · Pulse`;
-    app.innerHTML = `<section class="detail-page"><button class="back-button" data-action="back">← history</button><div class="detail-kicker"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span>${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></div><h1>${escapeHtml(event.title)}</h1><p class="detail-summary">${escapeHtml(event.summary || event.body || "")}</p><div class="why-card"><span class="eyebrow">why Pulse surfaced this</span><p>${escapeHtml(event.body || "matched your relevance rules")}</p><div class="signal-meter"><span style="width:${Math.max(4, Math.min(100, event.score))}%"></span></div><div class="meter-label"><span>${escapeHtml(event.priority)} priority</span><span>${event.score}/100</span></div></div><div class="detail-actions"><a class="button" href="${escapeHtml(event.url)}" target="_blank" rel="noreferrer">open source</a><button class="button secondary" data-action="remind" data-event-id="${escapeHtml(event.id)}">remind me</button><button class="button ghost-button" data-action="mute" data-topic="${escapeHtml(event.topic)}">mute topic</button></div><p class="fine-print">event id ${escapeHtml(event.id)}</p></section>`;
+    app.innerHTML = `<section class="detail-page"><button class="back-button" data-action="back">← history</button><div class="detail-kicker"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span>${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></div><h1>${escapeHtml(event.title)}</h1><p class="detail-summary">${escapeHtml(event.summary || event.body || "")}</p><div class="why-card"><span class="eyebrow">why Pulse surfaced this</span><p>${escapeHtml(event.body || "matched your relevance rules")}</p><div class="signal-meter"><span style="width:${Math.max(4, Math.min(100, event.score))}%"></span></div><div class="meter-label"><span>${escapeHtml(event.priority)} priority</span><span>${event.score}/100</span></div></div>${detailQuality(event)}<div class="detail-actions"><a class="button" data-action="source-click" data-event-id="${escapeHtml(event.id)}" href="${escapeHtml(event.url)}" target="_blank" rel="noreferrer">open source</a><button class="button secondary" data-action="remind" data-event-id="${escapeHtml(event.id)}">remind me</button><button class="button ghost-button" data-action="mute" data-topic="${escapeHtml(event.topic)}">mute topic</button></div>${detailFeedback(event)}<p class="fine-print">event id ${escapeHtml(event.id)}</p></section>`;
   } catch (error) {
     app.innerHTML = `<section class="empty-state"><h2>signal unavailable</h2><p>${escapeHtml(error.message)}</p><button class="button" data-action="back">back to history</button></section>`;
   }
@@ -261,15 +300,42 @@ document.addEventListener("click", async (event) => {
   try {
     if (action === "enable-alerts") await enableAlerts();
     if (action === "test-push") { const result = await api("/api/push/test", { method: "POST", body: "{}" }); showToast(result.delivery?.sent ? "test sent" : "test event saved; delivery is not configured"); }
+    if (action === "source-click") { void api(`/api/events/${encodeURIComponent(event.target.closest("[data-event-id]")?.dataset.eventId || state.detail?.id)}/source-clicked`, { method: "POST", body: "{}" }); return; }
     if (action === "logout") { await api("/api/auth/logout", { method: "POST", body: "{}" }); state.authenticated = false; render(); }
     if (action === "back") { history.pushState({}, "", "/"); await loadAuthenticatedState(); render(); }
     if (action === "reload") window.location.reload();
     if (action === "remind") { await api(`/api/events/${encodeURIComponent(event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id)}/remind`, { method: "POST", body: JSON.stringify({ minutes: 60 }) }); showToast("reminder set for one hour"); }
     if (action === "mute") { await api(`/api/topics/${encodeURIComponent(event.target.closest("[data-topic]")?.dataset.topic || state.detail.topic)}/mute`, { method: "POST", body: JSON.stringify({ days: 7 }) }); showToast("topic muted for seven days"); }
+    if (action === "follow" || action === "less-like") {
+      const eventId = event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id;
+      const entityId = event.target.closest("[data-entity-id]")?.dataset.entityId;
+      await api(`/api/events/${encodeURIComponent(eventId)}/feedback`, { method: "POST", body: JSON.stringify({ action: action === "follow" ? "follow" : "less_like", ...(entityId ? { entity_id: entityId } : {}) }) });
+      state.learning = await api("/api/learning");
+      showToast(action === "follow" ? "interest followed" : "we will show less like this");
+    }
     if (action === "save-rules") {
       const thresholds = Object.fromEntries([...document.querySelectorAll("[data-threshold-topic]")].map((input) => [input.dataset.thresholdTopic, Number(input.value)]));
       const result = await api("/api/preferences", { method: "PUT", body: JSON.stringify({ quiet_start: document.querySelector("#quiet-start").value, quiet_end: document.querySelector("#quiet-end").value, topic_thresholds: thresholds }) });
       state.preferences = result.preferences; showToast("rules saved");
+    }
+    if (action === "save-discovery") {
+      let profiles;
+      let entities;
+      try {
+        profiles = JSON.parse(document.querySelector("#profiles-json").value);
+        entities = JSON.parse(document.querySelector("#entities-json").value);
+      } catch (_error) {
+        showToast("discovery settings must be valid JSON", true);
+        return;
+      }
+      const result = await api("/api/discovery", { method: "PUT", body: JSON.stringify({ profiles, entities }) });
+      state.discovery = { ...state.discovery, ...result };
+      showToast("discovery settings saved");
+    }
+    if (action === "reset-learning") {
+      await api("/api/learning", { method: "DELETE", body: "{}" });
+      state.learning = await api("/api/learning");
+      showToast("feedback history reset");
     }
   } catch (error) {
     showToast(error.message, true);

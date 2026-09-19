@@ -5,10 +5,11 @@ import time
 from datetime import datetime, timezone
 
 from .config import load_config
+from .discovery import collect_discovery_candidates
 from .push import send_payload
-from .rules import should_notify
+from .rules import apply_preference_adjustments, should_notify
 from .sources import collect_candidates
-from .storage import connect, due_reminders, get_preferences, init_db, mark_notified, mark_reminded, pending_events, upsert_event
+from .storage import connect, due_reminders, get_preferences, init_db, mark_notified, mark_reminded, pending_events, record_event_action, runtime_config, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
 
@@ -30,6 +31,8 @@ def _payload(config: dict, event: dict, reminder: bool = False) -> dict:
 def _send_event(conn, config: dict, event: dict, reminder: bool = False) -> dict:
     result = send_payload(conn, config, _payload(config, event, reminder))
     mark_notified(conn, event["id"])
+    if result.get("sent", 0):
+        record_event_action(conn, event["id"], "delivered", str(result.get("sent", 0)))
     conn.commit()
     return result
 
@@ -42,13 +45,21 @@ def run_once(config: dict | None = None) -> dict:
     notifications = 0
     errors = []
     try:
-        candidates = collect_candidates(conn, config)
+        runtime = runtime_config(conn, config)
+        direct_candidates = collect_candidates(conn, runtime)
+        candidates = [*direct_candidates]
+        try:
+            candidates.extend(collect_discovery_candidates(conn, runtime, direct_candidates))
+        except Exception as exc:
+            LOGGER.exception("discovery check failed: %s", exc)
+        conn.commit()
+        preferences = get_preferences(conn, runtime)
         for candidate in candidates:
+            apply_preference_adjustments(candidate, preferences)
             event, created = upsert_event(conn, candidate)
             inserted += int(created)
             if created:
                 conn.commit()
-        preferences = get_preferences(conn, config)
         for event in pending_events(conn):
             allowed, reason = should_notify(event, preferences)
             if not allowed:

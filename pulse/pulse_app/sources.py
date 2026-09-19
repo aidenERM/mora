@@ -14,7 +14,7 @@ import requests
 from xml.etree import ElementTree
 
 from .config import TOPIC_LABELS
-from .rules import canonical_url, clean_text, score_item
+from .rules import annotate_candidate, canonical_url, clean_text, score_item
 from .storage import get_source_state, save_source_state
 
 LOGGER = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ DEFAULT_SOURCES = [
         "label": "Apple Newsroom",
         "url": "https://www.apple.com/newsroom/rss-feed.rss",
         "topic": "apple",
+        "trust": "primary",
         "keywords": ["iphone", "ios", "ipad", "mac", "macbook", "apple watch", "airpods", "vision pro", "apple intelligence"],
     },
     {
@@ -35,6 +36,7 @@ DEFAULT_SOURCES = [
         "label": "Call of Duty Blog",
         "url": "https://www.callofduty.com/blog/warzone",
         "topic": "warzone",
+        "trust": "primary",
         "keywords": ["warzone", "patch notes", "season", "weapon", "balance", "ricochet", "loadout", "battle royale", "verdansk"],
     },
 ]
@@ -121,15 +123,16 @@ def configured_sources(config: dict) -> list[dict]:
             "label": "Colombia news",
             "url": config["COLOMBIA_RSS_URL"],
             "topic": "colombia",
+            "trust": "reliable_secondary",
             "keywords": ["colombia", "gobierno", "emergencia", "alerta", "seguridad", "transporte", "temblor", "cierre", "elecciones", "banco de la república", "decreto"],
         })
     for source in config.get("RSS_SOURCES", []):
-        sources.append({"kind": "rss", **source})
+        sources.append({"kind": "rss", "trust": "reliable_secondary", **source})
     for source in config.get("URL_WATCHERS", []):
-        sources.append({"kind": "url", **source})
+        sources.append({"kind": "url", "trust": "reliable_secondary", **source})
     for repo in config.get("GITHUB_REPOS", []):
         source_id = "github:" + repo.lower()
-        sources.append({"id": source_id, "kind": "github", "label": repo, "repo": repo, "topic": "github", "keywords": [], "always_relevant": True})
+        sources.append({"id": source_id, "kind": "github", "label": repo, "repo": repo, "topic": "github", "trust": "primary", "keywords": [], "always_relevant": True})
     return [source for source in sources if source.get("id") and source.get("url") or source.get("kind") == "github"]
 
 
@@ -138,7 +141,7 @@ def _source_item(source: dict, item: dict, initial_suppress: bool = False, score
     summary = clean_text(item.get("summary", ""), 700)
     score, relevant, reason = score_item(source["topic"], title, summary, source.get("keywords", []), bool(source.get("always_relevant")), int(source.get("boost", 0)))
     if score_override is not None:
-        score, relevant, reason = score_override, True, "weather rule matched"
+        score, relevant, reason = score_override, True, "weather rule matched" if source.get("kind") == "weather" else "watched directly"
     identity = item.get("guid") or item.get("url") or (title + (item.get("published_at") or ""))
     canonical_key = source["id"] + ":" + hashlib.sha256(str(identity).encode("utf-8")).hexdigest()[:24]
     event_id = hashlib.sha256(canonical_key.encode("utf-8")).hexdigest()[:20]
@@ -157,6 +160,12 @@ def _source_item(source: dict, item: dict, initial_suppress: bool = False, score
         "relevant": relevant,
         "priority": "critical" if score >= 90 else "high" if score >= 80 else "normal" if score >= 65 else "low",
         "suppress_notification": initial_suppress,
+        "metadata": {
+            "source_trust": source.get("trust", "reliable_secondary"),
+            "confidence": "confirmed" if source.get("trust") == "primary" else "likely",
+            "verification": "direct_watcher",
+            "sources": [{"url": item.get("url") or source.get("url"), "title": title, "trust": source.get("trust", "reliable_secondary")}],
+        },
     }
 
 
@@ -211,6 +220,70 @@ def _github_candidates(conn, source: dict, config: dict) -> list[dict]:
     return candidates
 
 
+def github_webhook_candidate(payload: dict, event_type: str, config: dict) -> dict | None:
+    """Turn a validated GitHub delivery into the same event shape as polling."""
+    repository = payload.get("repository") or {}
+    repo = str(repository.get("full_name") or "").strip()
+    if not repo or (config.get("GITHUB_REPOS") and repo.casefold() not in {item.casefold() for item in config["GITHUB_REPOS"]}):
+        return None
+    action = str(payload.get("action") or "")
+    source = {
+        # Keep release keys compatible with the 15-minute release fallback.
+        "id": "github:" + repo.lower(),
+        "kind": "github_webhook",
+        "label": repo,
+        "topic": "github",
+        "trust": "primary",
+        "keywords": [],
+        "always_relevant": True,
+    }
+    repository_url = repository.get("html_url") or "https://github.com/" + repo
+    item = None
+    if event_type == "release" and action in {"published", "created", "released"}:
+        release = payload.get("release") or {}
+        release_id = release.get("id") or release.get("tag_name") or release.get("html_url")
+        item = {
+            "title": f"{repo} release: {release.get('name') or release.get('tag_name') or 'new release'}",
+            "summary": clean_text(release.get("body", ""), 700),
+            "url": release.get("html_url") or repository_url,
+            "guid": str(release_id),
+            "published_at": release.get("published_at") or release.get("created_at"),
+        }
+    elif event_type == "push":
+        commits = payload.get("commits") or []
+        if not commits:
+            return None
+        messages = [clean_text(commit.get("message", "").splitlines()[0], 180) for commit in commits if commit.get("message")]
+        item = {
+            "title": f"{repo} push: {len(commits)} commit" + ("s" if len(commits) != 1 else ""),
+            "summary": clean_text("; ".join(messages), 700) or "new repository activity",
+            "url": payload.get("compare") or repository_url,
+            "guid": f"push:{payload.get('after') or payload.get('head_commit', {}).get('id') or payload.get('ref')}",
+            "published_at": None,
+        }
+    elif event_type in {"issues", "pull_request"} and action in {"opened", "reopened", "closed", "ready_for_review"}:
+        item_data = payload.get("issue") or payload.get("pull_request") or {}
+        kind = "pull request" if event_type == "pull_request" else "issue"
+        number = item_data.get("number") or payload.get("number")
+        item = {
+            "title": f"{repo} {kind} {number}: {item_data.get('title') or action}",
+            "summary": clean_text(item_data.get("body", ""), 700) or f"{kind} {action}",
+            "url": item_data.get("html_url") or repository_url,
+            "guid": f"{kind}:{number}:{action}",
+            "published_at": item_data.get("updated_at"),
+        }
+    if not item:
+        return None
+    candidate = _source_item(source, item)
+    candidate["metadata"].update({
+        "source_trust": "primary",
+        "confidence": "confirmed",
+        "verification": "github_webhook",
+        "sources": [{"url": item["url"], "title": candidate["title"], "trust": "primary"}],
+    })
+    return annotate_candidate(candidate, config.get("TRACKED_ENTITIES", []))
+
+
 def weather_candidates(conn, config: dict) -> list[dict]:
     params = urlencode({
         "latitude": config["WEATHER_LAT"],
@@ -225,7 +298,7 @@ def weather_candidates(conn, config: dict) -> list[dict]:
     probs = hourly.get("precipitation_probability", [])[:12]
     rain = hourly.get("precipitation", [])[:12]
     codes = hourly.get("weather_code", [])[:12]
-    source = {"id": "weather:" + config["WEATHER_LABEL"].lower(), "kind": "weather", "label": config["WEATHER_LABEL"], "topic": "weather", "keywords": [], "always_relevant": True}
+    source = {"id": "weather:" + config["WEATHER_LABEL"].lower(), "kind": "weather", "label": config["WEATHER_LABEL"], "topic": "weather", "trust": "primary", "keywords": [], "always_relevant": True}
     state = get_source_state(conn, source["id"])
     initializing = not bool(state.get("initialized"))
     save_source_state(conn, source["id"], {"initialized": True})
@@ -259,4 +332,4 @@ def collect_candidates(conn, config: dict) -> list[dict]:
                 candidates.extend(_github_candidates(conn, source, config))
         except Exception as exc:
             LOGGER.warning("source %s failed: %s", source.get("id"), exc)
-    return candidates
+    return [annotate_candidate(candidate, config.get("TRACKED_ENTITIES", [])) for candidate in candidates]

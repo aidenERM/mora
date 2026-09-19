@@ -48,6 +48,61 @@ def score_item(topic: str, title: str, summary: str, keywords: list[str], always
     return score, True, reason
 
 
+def matched_entities(text: str, entities: list[dict]) -> list[dict]:
+    normalized = normalize(text)
+    matches = []
+    for entity in entities or []:
+        aliases = entity.get("aliases") or [entity.get("name", "")]
+        if any(re.search(r"(?<!\w)" + re.escape(normalize(alias)) + r"(?!\w)", normalized) for alias in aliases if alias):
+            matches.append(entity)
+    return matches
+
+
+def annotate_candidate(candidate: dict, entities: list[dict]) -> dict:
+    metadata = dict(candidate.get("metadata") or {})
+    matches = matched_entities(candidate.get("title", "") + " " + candidate.get("summary", ""), entities)
+    boost = min(30, sum(max(0, int(item.get("boost", 0))) for item in matches))
+    if boost:
+        candidate["score"] = min(100, int(candidate.get("score", 0)) + boost)
+        names = ", ".join(item.get("name", item.get("id", "")) for item in matches[:4])
+        candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; tracked: " + names
+    metadata["entities"] = [item.get("id") for item in matches if item.get("id")]
+    metadata["entity_names"] = [item.get("name", item.get("id", "")) for item in matches]
+    candidate["metadata"] = metadata
+    candidate["priority"] = priority_for(int(candidate.get("score", 0)))
+    return candidate
+
+
+def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
+    """Apply small, inspectable preference changes after deterministic scoring."""
+    metadata = candidate.get("metadata") or {}
+    entity_ids = set(metadata.get("entities") or [])
+    followed = set((preferences.get("followed_entities") or {}).keys())
+    less_like_entities = set((preferences.get("less_like_entities") or {}).keys())
+    less_like_topics = set((preferences.get("less_like_topics") or {}).keys())
+    adjustment = 0
+    reasons = []
+    followed_matches = entity_ids & followed
+    if followed_matches:
+        adjustment += min(24, 12 * len(followed_matches))
+        reasons.append("followed interest")
+    less_matches = entity_ids & less_like_entities
+    if less_matches:
+        adjustment -= min(36, 18 * len(less_matches))
+        reasons.append("less-like feedback")
+    if candidate.get("topic") in less_like_topics:
+        adjustment -= 24
+        reasons.append("less-like topic")
+    topic_weight = int((preferences.get("learned_topic_weights") or {}).get(candidate.get("topic"), 0))
+    if topic_weight:
+        adjustment += max(-12, min(12, topic_weight))
+    if adjustment:
+        candidate["score"] = max(0, min(100, int(candidate.get("score", 0)) + adjustment))
+        candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; " + ", ".join(reasons)
+        candidate["priority"] = priority_for(candidate["score"])
+    return candidate
+
+
 def priority_for(score: int) -> str:
     if score >= 90:
         return "critical"

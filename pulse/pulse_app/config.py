@@ -28,6 +28,53 @@ TOPIC_LABELS = {
     "system": "Pulse",
 }
 
+DEFAULT_SEARCH_PROFILES = [
+    {
+        "id": "warzone-discovery",
+        "label": "Warzone updates",
+        "topic": "warzone",
+        "queries": ["Warzone balance update", "Warzone weapon meta changes", "Warzone patch notes"],
+        "keywords": ["warzone", "weapon", "balance", "patch", "meta", "season"],
+        "active": True,
+    },
+    {
+        "id": "apple-discovery",
+        "label": "Apple and devices",
+        "topic": "apple",
+        "queries": ["Apple announcement today", "iPhone update", "Apple Watch update"],
+        "keywords": ["apple", "iphone", "ios", "ipad", "mac", "watch", "airpods"],
+        "active": True,
+    },
+    {
+        "id": "ai-tech-discovery",
+        "label": "AI and major tech",
+        "topic": "apple",
+        "queries": ["OpenAI latest release", "major AI model announcement", "major technology release"],
+        "keywords": ["openai", "ai", "model", "release", "announcement", "technology"],
+        "active": True,
+    },
+    {
+        "id": "colombia-discovery",
+        "label": "Colombia and Medellín",
+        "topic": "colombia",
+        "queries": ["Colombia major breaking news", "Medellín major event", "Antioquia emergency alert"],
+        "keywords": ["colombia", "medellin", "antioquia", "emergency", "alert", "government"],
+        "active": True,
+    },
+]
+
+DEFAULT_TRACKED_ENTITIES = [
+    {"id": "rev", "name": "REV", "aliases": ["REV"], "topic": "warzone", "boost": 18},
+    {"id": "voyak", "name": "Voyak", "aliases": ["Voyak"], "topic": "warzone", "boost": 18},
+    {"id": "warzone", "name": "Warzone", "aliases": ["Warzone", "Call of Duty Warzone"], "topic": "warzone", "boost": 8},
+    {"id": "ps5-pro", "name": "PS5 Pro", "aliases": ["PS5 Pro", "PlayStation 5 Pro"], "topic": "apple", "boost": 10},
+    {"id": "apple-watch-series-12", "name": "Apple Watch Series 12", "aliases": ["Apple Watch Series 12"], "topic": "apple", "boost": 14},
+    {"id": "iphone-18", "name": "iPhone 18", "aliases": ["iPhone 18"], "topic": "apple", "boost": 14},
+    {"id": "openai", "name": "OpenAI", "aliases": ["OpenAI", "GPT"], "topic": "apple", "boost": 12},
+    {"id": "ultimate-macro", "name": "Ultimate Macro", "aliases": ["Ultimate Macro"], "topic": "github", "boost": 18},
+    {"id": "aidenerm-mora", "name": "aidenERM/mora", "aliases": ["aidenERM/mora"], "topic": "github", "boost": 18},
+]
+
 
 def _load_dotenv() -> None:
     path = ROOT / ".env"
@@ -85,6 +132,15 @@ def load_config(test_config: dict | None = None) -> dict:
         "WEATHER_LABEL": os.environ.get("PULSE_WEATHER_LABEL", "La Ceja, Antioquia"),
         "GITHUB_REPOS": [x.strip() for x in os.environ.get("PULSE_GITHUB_REPOS", "").split(",") if x.strip()],
         "GITHUB_TOKEN": os.environ.get("PULSE_GITHUB_TOKEN", ""),
+        "GITHUB_WEBHOOK_SECRET": os.environ.get("PULSE_GITHUB_WEBHOOK_SECRET", ""),
+        "BRAVE_SEARCH_API_KEY": os.environ.get("PULSE_BRAVE_SEARCH_API_KEY", ""),
+        "DISCOVERY_INTERVAL_MINUTES": max(60, min(1440, int(os.environ.get("PULSE_DISCOVERY_INTERVAL_MINUTES", "180")))),
+        "DISCOVERY_MAX_QUERIES": max(1, min(20, int(os.environ.get("PULSE_DISCOVERY_MAX_QUERIES", "5")))),
+        "DISCOVERY_MAX_RESULTS": max(1, min(10, int(os.environ.get("PULSE_DISCOVERY_MAX_RESULTS", "5")))),
+        "DISCOVERY_FRESHNESS": os.environ.get("PULSE_DISCOVERY_FRESHNESS", "pw"),
+        "DISCOVERY_ON_WATCHER": _bool("PULSE_DISCOVERY_ON_WATCHER", True),
+        "SEARCH_PROFILES": _json("PULSE_SEARCH_PROFILES_JSON", DEFAULT_SEARCH_PROFILES) or DEFAULT_SEARCH_PROFILES,
+        "TRACKED_ENTITIES": _json("PULSE_TRACKED_ENTITIES_JSON", DEFAULT_TRACKED_ENTITIES) or DEFAULT_TRACKED_ENTITIES,
         "RSS_SOURCES": _json("PULSE_RSS_SOURCES_JSON", []) or [],
         "URL_WATCHERS": _json("PULSE_URL_WATCHERS_JSON", []) or [],
         "COLOMBIA_RSS_URL": os.environ.get("PULSE_COLOMBIA_RSS_URL", ""),

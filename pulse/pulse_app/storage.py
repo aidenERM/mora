@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import DEFAULT_THRESHOLDS
+from .config import DEFAULT_SEARCH_PROFILES, DEFAULT_THRESHOLDS, DEFAULT_TRACKED_ENTITIES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -47,11 +47,20 @@ CREATE TABLE IF NOT EXISTS events (
     reminded_at TEXT,
     remind_at TEXT,
     clicked_at TEXT,
-    created_from TEXT NOT NULL DEFAULT 'source'
+    created_from TEXT NOT NULL DEFAULT 'source',
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_events_recent ON events(discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic, discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_pending ON events(notified_at, suppress_notification, score);
+CREATE TABLE IF NOT EXISTS event_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_actions_event ON event_actions(event_id, created_at DESC);
 """
 
 
@@ -72,6 +81,9 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
+        event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "metadata" not in event_columns:
+            conn.execute("ALTER TABLE events ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('preferences',?)", (json.dumps({}),))
         if initial_password_hash:
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash',?)", (initial_password_hash,))
@@ -103,6 +115,8 @@ def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     base.update({key: value for key, value in stored.items() if key in base})
     base["topic_thresholds"] = {**base["topic_thresholds"], **stored.get("topic_thresholds", {})}
     base["muted_topics"] = stored.get("muted_topics", {})
+    for key in ("followed_entities", "less_like_entities", "less_like_topics", "learned_topic_weights"):
+        base[key] = stored.get(key, {}) if isinstance(stored.get(key, {}), dict) else {}
     return base
 
 
@@ -112,6 +126,34 @@ def save_preferences(conn: sqlite3.Connection, preferences: dict) -> None:
         (json.dumps(preferences, separators=(",", ":")),),
     )
     conn.commit()
+
+
+def get_json_setting(conn: sqlite3.Connection, key: str, default):
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    if not row:
+        return default
+    try:
+        return json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def save_json_setting(conn: sqlite3.Connection, key: str, value) -> None:
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, json.dumps(value, separators=(",", ":"))),
+    )
+    conn.commit()
+
+
+def runtime_config(conn: sqlite3.Connection, config: dict) -> dict:
+    """Overlay settings editable in Pulse on top of environment configuration."""
+    result = dict(config)
+    profiles = get_json_setting(conn, "search_profiles", config.get("SEARCH_PROFILES", DEFAULT_SEARCH_PROFILES))
+    entities = get_json_setting(conn, "tracked_entities", config.get("TRACKED_ENTITIES", DEFAULT_TRACKED_ENTITIES))
+    result["SEARCH_PROFILES"] = profiles if isinstance(profiles, list) else config.get("SEARCH_PROFILES", DEFAULT_SEARCH_PROFILES)
+    result["TRACKED_ENTITIES"] = entities if isinstance(entities, list) else config.get("TRACKED_ENTITIES", DEFAULT_TRACKED_ENTITIES)
+    return result
 
 
 def get_password_hash(conn: sqlite3.Connection, fallback: str = "") -> str:
@@ -124,6 +166,61 @@ def save_password_hash(conn: sqlite3.Connection, password_hash: str) -> None:
         "INSERT INTO settings(key,value) VALUES('password_hash',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (password_hash,),
     )
+    conn.commit()
+
+
+def record_event_action(conn: sqlite3.Connection, event_id: str, action: str, value: str = "") -> None:
+    conn.execute(
+        "INSERT INTO event_actions(event_id,action,value,created_at) VALUES(?,?,?,?)",
+        (event_id, action[:60], value[:500], utc_now()),
+    )
+
+
+def event_action_summary(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        "SELECT action,COUNT(*) AS count FROM event_actions GROUP BY action ORDER BY action"
+    ).fetchall()
+    return {row["action"]: row["count"] for row in rows}
+
+
+def learning_metrics(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        "SELECT event_id,action,created_at FROM event_actions WHERE action IN ('delivered','opened') ORDER BY created_at"
+    ).fetchall()
+    deliveries = {}
+    opens = {}
+    for row in rows:
+        target = deliveries if row["action"] == "delivered" else opens
+        target.setdefault(row["event_id"], row["created_at"])
+    times = []
+    for event_id, opened_at in opens.items():
+        delivered_at = deliveries.get(event_id)
+        if not delivered_at:
+            continue
+        try:
+            seconds = (datetime.fromisoformat(opened_at) - datetime.fromisoformat(delivered_at)).total_seconds()
+        except ValueError:
+            continue
+        if seconds >= 0:
+            times.append(seconds)
+    return {
+        "measured_opens": len(times),
+        "average_time_to_open_seconds": round(sum(times) / len(times)) if times else None,
+        "delivered_not_opened": max(0, len(deliveries) - len(times)),
+    }
+
+
+def clear_learning(conn: sqlite3.Connection) -> None:
+    preferences = get_json_setting(conn, "preferences", {})
+    if not isinstance(preferences, dict):
+        preferences = {}
+    for key in ("followed_entities", "less_like_entities", "less_like_topics", "learned_topic_weights"):
+        preferences.pop(key, None)
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES('preferences',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (json.dumps(preferences, separators=(",", ":")),),
+    )
+    conn.execute("DELETE FROM event_actions WHERE action IN ('follow', 'less_like', 'opened', 'source_clicked')")
     conn.commit()
 
 
@@ -184,6 +281,10 @@ def event_from_row(row: sqlite3.Row | None) -> dict | None:
     item = dict(row)
     for key in ("relevant", "suppress_notification"):
         item[key] = bool(item[key])
+    try:
+        item["metadata"] = json.loads(item.get("metadata") or "{}")
+    except json.JSONDecodeError:
+        item["metadata"] = {}
     return item
 
 
@@ -216,22 +317,22 @@ def upsert_event(conn: sqlite3.Connection, event: dict) -> tuple[dict, bool]:
     existing = conn.execute("SELECT * FROM events WHERE canonical_key=?", (event["canonical_key"],)).fetchone()
     if existing:
         conn.execute(
-            """UPDATE events SET title=?,summary=?,body=?,url=?,published_at=?,last_seen_at=?,score=?,priority=?,relevant=?
+            """UPDATE events SET title=?,summary=?,body=?,url=?,published_at=?,last_seen_at=?,score=?,priority=?,relevant=?,suppress_notification=?,metadata=?
                WHERE canonical_key=?""",
             (
                 event["title"], event["summary"], event["body"], event["url"], event.get("published_at"),
-                now, event["score"], event["priority"], int(event["relevant"]), event["canonical_key"],
+                now, event["score"], event["priority"], int(event["relevant"]), int(event.get("suppress_notification", False)), json.dumps(event.get("metadata") or {}, separators=(",", ":")), event["canonical_key"],
             ),
         )
         return event_from_row(conn.execute("SELECT * FROM events WHERE canonical_key=?", (event["canonical_key"],)).fetchone()), False
     conn.execute(
-        """INSERT INTO events(id,source_id,source_kind,topic,title,summary,body,url,canonical_key,published_at,discovered_at,last_seen_at,score,priority,relevant,suppress_notification,created_from)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO events(id,source_id,source_kind,topic,title,summary,body,url,canonical_key,published_at,discovered_at,last_seen_at,score,priority,relevant,suppress_notification,created_from,metadata)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             event["id"], event["source_id"], event["source_kind"], event["topic"], event["title"],
             event.get("summary", ""), event.get("body", ""), event["url"], event["canonical_key"],
             event.get("published_at"), event["discovered_at"], now, event["score"], event["priority"],
-            int(event["relevant"]), int(event.get("suppress_notification", False)), event.get("created_from", "source"),
+            int(event["relevant"]), int(event.get("suppress_notification", False)), event.get("created_from", "source"), json.dumps(event.get("metadata") or {}, separators=(",", ":")),
         ),
     )
     return event_from_row(conn.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()), True
@@ -243,6 +344,7 @@ def mark_notified(conn: sqlite3.Connection, event_id: str) -> None:
 
 def mark_clicked(conn: sqlite3.Connection, event_id: str) -> None:
     conn.execute("UPDATE events SET clicked_at=? WHERE id=?", (utc_now(), event_id))
+    record_event_action(conn, event_id, "opened")
 
 
 def set_reminder(conn: sqlite3.Connection, event_id: str, minutes: int) -> dict | None:
