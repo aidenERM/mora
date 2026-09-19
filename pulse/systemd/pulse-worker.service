@@ -1,0 +1,22 @@
+[Unit]
+Description=pulse.moralife.uk source worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pulse
+Group=pulse
+WorkingDirectory=/opt/pulse/pulse
+EnvironmentFile=/etc/pulse.env
+ExecStart=/opt/pulse/.venv/bin/python -m pulse_app.worker
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/pulse
+
+[Install]
+WantedBy=multi-user.target

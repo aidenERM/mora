@@ -1,0 +1,14 @@
+{
+  "id": "https://pulse.moralife.uk/",
+  "name": "Pulse",
+  "short_name": "Pulse",
+  "description": "A quiet personal notification layer.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080b12",
+  "theme_color": "#080b12",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

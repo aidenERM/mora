@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#080b12">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Pulse">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="stylesheet" href="/static/styles.css">
+  <title>Pulse · quiet signals</title>
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Pulse home"><span class="brand-mark">p</span><span>pulse</span></a>
+      <div id="connection-status" class="connection-status"><span class="status-dot"></span><span>checking</span></div>
+    </header>
+    <main id="app" class="main" aria-live="polite">
+      <section class="loading-state"><span class="loader"></span><p>opening your signal layer</p></section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

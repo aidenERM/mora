@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import logging
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlencode
+import requests
+from xml.etree import ElementTree
+
+from .config import TOPIC_LABELS
+from .rules import canonical_url, clean_text, score_item
+from .storage import get_source_state, save_source_state
+
+LOGGER = logging.getLogger(__name__)
+USER_AGENT = "Mozilla/5.0"
+
+DEFAULT_SOURCES = [
+    {
+        "id": "apple-newsroom",
+        "kind": "rss",
+        "label": "Apple Newsroom",
+        "url": "https://www.apple.com/newsroom/rss-feed.rss",
+        "topic": "apple",
+        "keywords": ["iphone", "ios", "ipad", "mac", "macbook", "apple watch", "airpods", "vision pro", "apple intelligence"],
+    },
+    {
+        "id": "call-of-duty-blog",
+        "kind": "url",
+        "label": "Call of Duty Blog",
+        "url": "https://www.callofduty.com/blog/warzone",
+        "topic": "warzone",
+        "keywords": ["warzone", "patch notes", "season", "weapon", "balance", "ricochet", "loadout", "battle royale", "verdansk"],
+    },
+]
+
+
+def _request(url: str, headers: dict | None = None) -> bytes:
+    request_headers = {"User-Agent": USER_AGENT, **(headers or {})}
+    try:
+        response = requests.get(url, headers=request_headers, timeout=25)
+        response.raise_for_status()
+        return response.content[:2_000_000]
+    except requests.RequestException:
+        # Some public sites close Python HTTP clients but answer a normal curl request.
+        # Keep this fallback bounded and only use it for configured source reads.
+        curl = "curl.exe" if os.name == "nt" else "curl"
+        command = [curl, "-L", "--fail", "--silent", "--show-error", "--max-time", "25", "--http1.1", "-A", USER_AGENT, url]
+        result = subprocess.run(command, check=True, capture_output=True, timeout=30)
+        return result.stdout[:2_000_000]
+
+
+def _text(element) -> str:
+    return clean_text(" ".join(element.itertext()) if element is not None else "", 1000)
+
+
+def _tag_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def _first(element, names: set[str]):
+    if element is None:
+        return None
+    for child in element.iter():
+        if _tag_name(child.tag) in names:
+            return child
+    return None
+
+
+def _parse_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return parsedate_to_datetime(value).astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        except (TypeError, ValueError):
+            return None
+
+
+def parse_feed(raw: bytes) -> list[dict]:
+    root = ElementTree.fromstring(raw)
+    result = []
+    for item in root.iter():
+        if _tag_name(item.tag) not in {"item", "entry"}:
+            continue
+        title = _text(_first(item, {"title"}))
+        summary = _text(_first(item, {"description", "summary", "content", "encoded"}))
+        link_element = _first(item, {"link"})
+        link = (link_element.attrib.get("href", "") if link_element is not None else "") or _text(link_element)
+        guid = _text(_first(item, {"guid", "id"}))
+        published = _text(_first(item, {"pubdate", "published", "updated", "date"}))
+        if title and link:
+            result.append({"title": html.unescape(title), "summary": html.unescape(summary), "url": canonical_url(html.unescape(link)), "guid": guid, "published_at": _parse_date(published)})
+    return result[:30]
+
+
+def _html_snapshot(raw: bytes) -> dict:
+    text = raw.decode("utf-8", errors="replace")
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    description_match = re.search(r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\'](.*?)["\']', text, re.I | re.S)
+    title = clean_text(html.unescape(title_match.group(1) if title_match else ""), 200)
+    description = clean_text(html.unescape(description_match.group(1) if description_match else ""), 600)
+    signal = clean_text(re.sub(r"<script.*?</script>|<style.*?</style>", " ", text, flags=re.I | re.S), 8000)
+    digest = hashlib.sha256(signal.encode("utf-8")).hexdigest()
+    return {"title": title or "Updated source", "summary": description or clean_text(signal, 400), "digest": digest}
+
+
+def configured_sources(config: dict) -> list[dict]:
+    sources = [*DEFAULT_SOURCES]
+    if config.get("COLOMBIA_RSS_URL"):
+        sources.append({
+            "id": "colombia-news",
+            "kind": "rss",
+            "label": "Colombia news",
+            "url": config["COLOMBIA_RSS_URL"],
+            "topic": "colombia",
+            "keywords": ["colombia", "gobierno", "emergencia", "alerta", "seguridad", "transporte", "temblor", "cierre", "elecciones", "banco de la república", "decreto"],
+        })
+    for source in config.get("RSS_SOURCES", []):
+        sources.append({"kind": "rss", **source})
+    for source in config.get("URL_WATCHERS", []):
+        sources.append({"kind": "url", **source})
+    for repo in config.get("GITHUB_REPOS", []):
+        source_id = "github:" + repo.lower()
+        sources.append({"id": source_id, "kind": "github", "label": repo, "repo": repo, "topic": "github", "keywords": [], "always_relevant": True})
+    return [source for source in sources if source.get("id") and source.get("url") or source.get("kind") == "github"]
+
+
+def _source_item(source: dict, item: dict, initial_suppress: bool = False, score_override: int | None = None) -> dict:
+    title = clean_text(item.get("title", "Untitled"), 240)
+    summary = clean_text(item.get("summary", ""), 700)
+    score, relevant, reason = score_item(source["topic"], title, summary, source.get("keywords", []), bool(source.get("always_relevant")), int(source.get("boost", 0)))
+    if score_override is not None:
+        score, relevant, reason = score_override, True, "weather rule matched"
+    identity = item.get("guid") or item.get("url") or (title + (item.get("published_at") or ""))
+    canonical_key = source["id"] + ":" + hashlib.sha256(str(identity).encode("utf-8")).hexdigest()[:24]
+    event_id = hashlib.sha256(canonical_key.encode("utf-8")).hexdigest()[:20]
+    return {
+        "id": event_id,
+        "source_id": source["id"],
+        "source_kind": source["kind"],
+        "topic": source["topic"],
+        "title": title,
+        "summary": summary,
+        "body": reason,
+        "url": item.get("url") or source.get("url") or "https://pulse.moralife.uk/",
+        "canonical_key": canonical_key,
+        "published_at": item.get("published_at"),
+        "score": score,
+        "relevant": relevant,
+        "priority": "critical" if score >= 90 else "high" if score >= 80 else "normal" if score >= 65 else "low",
+        "suppress_notification": initial_suppress,
+    }
+
+
+def _rss_candidates(conn, source: dict) -> list[dict]:
+    items = parse_feed(_request(source["url"], {"Accept": "application/rss+xml, application/atom+xml, application/xml"}))
+    state = get_source_state(conn, source["id"])
+    seen = set(state.get("seen", []))
+    initializing = not bool(state.get("initialized"))
+    candidates = []
+    keys = []
+    for item in items:
+        key = item.get("guid") or item.get("url") or item.get("title")
+        keys.append(str(key))
+        if key in seen and not initializing:
+            continue
+        candidates.append(_source_item(source, item, initial_suppress=initializing))
+    save_source_state(conn, source["id"], {"initialized": True, "seen": keys[:100]})
+    return candidates
+
+
+def _url_candidates(conn, source: dict) -> list[dict]:
+    snapshot = _html_snapshot(_request(source["url"], {"Accept": "text/html,application/xhtml+xml"}))
+    state = get_source_state(conn, source["id"])
+    changed = snapshot["digest"] != state.get("digest")
+    initializing = not bool(state.get("initialized"))
+    save_source_state(conn, source["id"], {"initialized": True, "digest": snapshot["digest"]})
+    if not changed and not initializing:
+        return []
+    return [_source_item(source, {"title": snapshot["title"], "summary": snapshot["summary"], "url": source["url"]}, initial_suppress=initializing)]
+
+
+def _github_candidates(conn, source: dict, config: dict) -> list[dict]:
+    headers = {"Accept": "application/vnd.github+json"}
+    if config.get("GITHUB_TOKEN"):
+        headers["Authorization"] = "Bearer " + config["GITHUB_TOKEN"]
+    url = "https://api.github.com/repos/" + source["repo"] + "/releases?per_page=5"
+    response = requests.get(url, headers={"User-Agent": USER_AGENT, **headers}, timeout=25)
+    response.raise_for_status()
+    releases = response.json()
+    state = get_source_state(conn, source["id"])
+    seen = set(state.get("seen", []))
+    initializing = not bool(state.get("initialized"))
+    candidates = []
+    keys = []
+    for release in releases:
+        key = str(release.get("id") or release.get("html_url"))
+        keys.append(key)
+        if key in seen and not initializing:
+            continue
+        candidates.append(_source_item(source, {"title": release.get("name") or release.get("tag_name") or "GitHub release", "summary": clean_text(release.get("body", ""), 700), "url": release.get("html_url", ""), "guid": key, "published_at": release.get("published_at")}, initial_suppress=initializing, score_override=88))
+    save_source_state(conn, source["id"], {"initialized": True, "seen": keys[:100]})
+    return candidates
+
+
+def weather_candidates(conn, config: dict) -> list[dict]:
+    params = urlencode({
+        "latitude": config["WEATHER_LAT"],
+        "longitude": config["WEATHER_LON"],
+        "timezone": "auto",
+        "forecast_days": 2,
+        "hourly": "precipitation_probability,precipitation,weather_code",
+    })
+    raw = json.loads(_request("https://api.open-meteo.com/v1/forecast?" + params).decode("utf-8"))
+    hourly = raw.get("hourly", {})
+    times = hourly.get("time", [])[:12]
+    probs = hourly.get("precipitation_probability", [])[:12]
+    rain = hourly.get("precipitation", [])[:12]
+    codes = hourly.get("weather_code", [])[:12]
+    source = {"id": "weather:" + config["WEATHER_LABEL"].lower(), "kind": "weather", "label": config["WEATHER_LABEL"], "topic": "weather", "keywords": [], "always_relevant": True}
+    state = get_source_state(conn, source["id"])
+    initializing = not bool(state.get("initialized"))
+    save_source_state(conn, source["id"], {"initialized": True})
+    candidates = []
+    for when, probability, amount, code in zip(times, probs, rain, codes):
+        probability, amount, code = int(probability or 0), float(amount or 0), int(code or 0)
+        if probability < 70 and code < 51:
+            continue
+        severity = 94 if code >= 95 or probability >= 90 else 82
+        description = f"{probability}% precipitation probability near {when.replace('T', ' ')}"
+        if amount:
+            description += f"; forecast {amount:g} mm"
+        item = {"title": f"Weather may interrupt plans in {config['WEATHER_LABEL']}", "summary": description, "url": "https://open-meteo.com/en/docs", "guid": when + ":rain", "published_at": None}
+        candidates.append(_source_item(source, item, initial_suppress=initializing, score_override=severity))
+    return candidates
+
+
+def collect_candidates(conn, config: dict) -> list[dict]:
+    candidates = []
+    try:
+        candidates.extend(weather_candidates(conn, config))
+    except Exception as exc:
+        LOGGER.warning("weather source failed: %s", exc)
+    for source in configured_sources(config):
+        try:
+            if source["kind"] == "rss":
+                candidates.extend(_rss_candidates(conn, source))
+            elif source["kind"] == "url":
+                candidates.extend(_url_candidates(conn, source))
+            elif source["kind"] == "github":
+                candidates.extend(_github_candidates(conn, source, config))
+        except Exception as exc:
+            LOGGER.warning("source %s failed: %s", source.get("id"), exc)
+    return candidates
