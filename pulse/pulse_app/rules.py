@@ -362,6 +362,13 @@ def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
         adjustment += 12
         reasons.append("important person")
         components["important_person"] = 12
+    purchase = ((candidate.get("metadata") or {}).get("lifecycle") or {}).get("purchase") or {}
+    watch_priority = purchase.get("watch_priority", "off") if isinstance(purchase, dict) else "off"
+    if watch_priority in {"normal", "high"}:
+        watch_boost = 10 if watch_priority == "high" else 4
+        adjustment += watch_boost
+        reasons.append("purchase watch")
+        components["purchase_watch"] = watch_boost
     aliases = {"warzone": {"gaming"}, "github": {"coding", "ultimate_macro"}, "package": {"packages"}, "purchase": {"purchases"}, "apple": {"music_media"}, "security": {"important_services"}}
     priority_values = preferences.get("personal_priorities") or {}
     manual_weight = sum(int(priority_values.get(key, 0)) for key in {candidate.get("topic"), *(aliases.get(candidate.get("topic"), set()))})

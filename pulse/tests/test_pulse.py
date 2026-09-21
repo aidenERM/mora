@@ -400,6 +400,19 @@ def test_game_event_countdowns_emit_once_per_window(tmp_path):
     assert event["game"] == "Warzone"
 
 
+def test_purchase_watch_is_a_bounded_scoring_signal(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    purchase = upsert_purchase_record(conn, "mail:1", merchant="store", title="Phone", lifecycle="ordered")
+    from pulse_app.storage import set_purchase_watch
+    watched = set_purchase_watch(conn, purchase["id"], "high")
+    assert watched["metadata"]["watch_priority"] == "high"
+    candidate = {"topic": "purchase", "source_id": "mail", "score": 70, "metadata": {"lifecycle": {"purchase": {"id": purchase["id"], "watch_priority": "high"}}}}
+    apply_preference_adjustments(candidate, {"personal_priorities": {}, "learned_topic_weights": {}, "learned_source_weights": {}, "followed_stories": {}})
+    assert candidate["metadata"]["score_components"]["purchase_watch"] == 10
+
+
 def test_weather_alerts_cover_rain_storm_heat_cold_and_wind(tmp_path, monkeypatch):
     database = tmp_path / "pulse.sqlite3"
     init_db(database)

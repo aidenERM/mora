@@ -472,7 +472,7 @@ def upsert_purchase_record(conn: sqlite3.Connection, external_key: str, **fields
         conn.execute("UPDATE purchases SET merchant=?,title=?,amount=?,currency=?,lifecycle=?,order_id=?,package_id=?,metadata=?,updated_at=? WHERE id=?", (*values, purchase_id))
     else:
         conn.execute("INSERT INTO purchases(id,external_key,merchant,title,amount,currency,lifecycle,order_id,package_id,metadata,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (purchase_id, external_key, *values))
-    return {"id": purchase_id, "external_key": external_key, "lifecycle": lifecycle, "changed": changed}
+    return {"id": purchase_id, "external_key": external_key, "lifecycle": lifecycle, "changed": changed, "watch_priority": (metadata or {}).get("watch_priority", "off")}
 
 
 def upsert_purchase(conn: sqlite3.Connection, external_key: str, **fields) -> str:
