@@ -389,6 +389,38 @@ def test_discovery_does_not_notify_single_community_claim(tmp_path, monkeypatch)
     assert candidates[0]["suppress_notification"] is True
 
 
+def test_discovery_uses_keyless_rss_provider_through_same_pipeline(tmp_path, monkeypatch):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({
+        "DATABASE_PATH": str(database),
+        "BRAVE_SEARCH_API_KEY": "",
+        "DISCOVERY_PUBLIC_RSS_ENABLED": True,
+        "DISCOVERY_MAX_QUERIES": 1,
+        "DISCOVERY_MAX_RESULTS": 2,
+        "SEARCH_PROFILES": [{"id": "warzone", "topic": "warzone", "queries": ["REV Warzone update"], "keywords": ["warzone", "update"], "active": True}],
+        "TRACKED_ENTITIES": [],
+    })
+    assert discovery.discovery_enabled(config) is True
+    assert discovery.discovery_provider(config)[1] == "google_news_rss"
+    monkeypatch.setattr(discovery.GoogleNewsRssProvider, "search", lambda self, query, count, freshness, search_lang: [
+        {"title": "REV Warzone update", "url": "https://www.callofduty.com/blog/rev", "snippet": "official", "published_at": None},
+    ])
+    monkeypatch.setattr(discovery, "fetch_page", lambda url: {"title": "REV Warzone update", "summary": "Weapon balance changed.", "content": "REV weapon balance changed in Warzone.", "digest": url})
+
+    candidates = discovery.collect_discovery_candidates(conn, config)
+    assert len(candidates) == 1
+    assert candidates[0]["source_kind"] == "search"
+    assert candidates[0]["metadata"]["verification"] == "single_source"
+
+
+def test_public_rss_discovery_can_be_disabled():
+    config = load_config({"BRAVE_SEARCH_API_KEY": "", "DISCOVERY_PUBLIC_RSS_ENABLED": False})
+    assert discovery.discovery_enabled(config) is False
+    assert discovery.discovery_provider(config)[1] == "disabled"
+
+
 def test_discovery_settings_feedback_and_github_webhook(tmp_path):
     client = make_client(tmp_path, {"GITHUB_WEBHOOK_SECRET": "webhook-secret", "GITHUB_REPOS": ["aidenERM/mora"]})
     login(client)

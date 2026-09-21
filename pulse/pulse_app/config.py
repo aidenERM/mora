@@ -342,6 +342,7 @@ def load_config(test_config: dict | None = None) -> dict:
         "GITHUB_TOKEN": os.environ.get("PULSE_GITHUB_TOKEN", ""),
         "GITHUB_WEBHOOK_SECRET": os.environ.get("PULSE_GITHUB_WEBHOOK_SECRET", ""),
         "BRAVE_SEARCH_API_KEY": os.environ.get("PULSE_BRAVE_SEARCH_API_KEY", ""),
+        "DISCOVERY_PUBLIC_RSS_ENABLED": _bool("PULSE_DISCOVERY_PUBLIC_RSS_ENABLED", True),
         "DISCOVERY_INTERVAL_MINUTES": max(60, min(1440, int(os.environ.get("PULSE_DISCOVERY_INTERVAL_MINUTES", "180")))),
         "DISCOVERY_MAX_QUERIES": max(1, min(20, int(os.environ.get("PULSE_DISCOVERY_MAX_QUERIES", "5")))),
         "DISCOVERY_MAX_RESULTS": max(1, min(10, int(os.environ.get("PULSE_DISCOVERY_MAX_RESULTS", "5")))),

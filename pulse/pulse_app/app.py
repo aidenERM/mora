@@ -14,6 +14,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import PERSONAL_PRIORITY_CATEGORIES, STATIC, TOPIC_LABELS, load_config
+from .discovery import discovery_enabled, discovery_provider
 from .push import configured as push_configured, send_payload
 from .rules import annotate_candidate, apply_preference_adjustments, cluster_id_for, evaluate_notification, score_item, significant_tokens
 from .sources import github_webhook_candidate
@@ -167,7 +168,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             vapid_public_key=config["VAPID_PUBLIC_KEY"],
             push_configured=push_configured(config),
             auth_configured=auth_enabled(),
-            discovery={"enabled": bool(config.get("BRAVE_SEARCH_API_KEY")), "interval_minutes": config["DISCOVERY_INTERVAL_MINUTES"]},
+            discovery={"enabled": discovery_enabled(config), "provider": discovery_provider(config)[1], "interval_minutes": config["DISCOVERY_INTERVAL_MINUTES"]},
             bedrock_model_id=config.get("BEDROCK_MODEL_ID"),
             topics=[{"id": key, "label": TOPIC_LABELS.get(key, key)} for key in config["TOPIC_THRESHOLDS"]],
             ios={"minimum_version": "16.4", "requires_home_screen": True},
@@ -223,7 +224,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     def discovery_settings():
         active = runtime_config(db(), config)
         return jsonify(
-            enabled=bool(config.get("BRAVE_SEARCH_API_KEY")),
+            enabled=discovery_enabled(config),
+            provider=discovery_provider(config)[1],
             interval_minutes=config["DISCOVERY_INTERVAL_MINUTES"],
             profiles=active["SEARCH_PROFILES"],
             entities=active["TRACKED_ENTITIES"],

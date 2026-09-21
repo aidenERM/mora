@@ -9,12 +9,15 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import requests
+from urllib.parse import urlencode
 
 from .rules import canonical_url, clean_text, matched_entities, priority_for, score_item, significant_tokens
+from .sources import parse_feed
 from .storage import get_source_state, save_source_state
 
 LOGGER = logging.getLogger("pulse.discovery")
 SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+GOOGLE_NEWS_SEARCH_URL = "https://news.google.com/rss/search"
 USER_AGENT = "Pulse/0.1 (+https://pulse.moralife.uk)"
 
 PRIMARY_DOMAINS = {
@@ -164,8 +167,65 @@ class BraveSearchProvider:
         ]
 
 
+class GoogleNewsRssProvider:
+    """Bounded, keyless discovery fallback using Google's public RSS search feed.
+
+    Results still go through page fetching, source trust, clustering, and the
+    normal relevance decision. This provider only replaces the search step.
+    """
+
+    def search(self, query: str, count: int, freshness: str, search_lang: str = "en") -> list[dict]:
+        language = "es-419" if search_lang == "es" else "en-US"
+        country = "CO"
+        params = {
+            "q": query[:600],
+            "hl": language,
+            "gl": country,
+            "ceid": f"{country}:{language}",
+        }
+        response = requests.get(
+            GOOGLE_NEWS_SEARCH_URL + "?" + urlencode(params),
+            headers={"Accept": "application/rss+xml, application/xml", "User-Agent": USER_AGENT},
+            timeout=20,
+        )
+        response.raise_for_status()
+        max_age_days = {"pd": 1, "pw": 7, "pm": 31}.get(freshness)
+        results = []
+        now = datetime.now(timezone.utc)
+        for item in parse_feed(response.content):
+            published_at = item.get("published_at")
+            if max_age_days and published_at:
+                try:
+                    published = datetime.fromisoformat(published_at)
+                    if now - published > timedelta(days=max_age_days):
+                        continue
+                except ValueError:
+                    pass
+            results.append({
+                "title": clean_text(item.get("title", ""), 240),
+                "url": canonical_url(item.get("url", "")),
+                "snippet": clean_text(item.get("summary", ""), 700),
+                "published_at": published_at,
+            })
+            if len(results) >= count:
+                break
+        return [item for item in results if item["title"] and item["url"]]
+
+
+def discovery_enabled(config: dict) -> bool:
+    return bool(config.get("BRAVE_SEARCH_API_KEY") or config.get("DISCOVERY_PUBLIC_RSS_ENABLED", True))
+
+
+def discovery_provider(config: dict):
+    if config.get("BRAVE_SEARCH_API_KEY"):
+        return BraveSearchProvider(config["BRAVE_SEARCH_API_KEY"]), "brave"
+    if config.get("DISCOVERY_PUBLIC_RSS_ENABLED", True):
+        return GoogleNewsRssProvider(), "google_news_rss"
+    return None, "disabled"
+
+
 def discovery_due(conn, config: dict, now: datetime | None = None) -> bool:
-    if not config.get("BRAVE_SEARCH_API_KEY"):
+    if not discovery_enabled(config):
         return False
     now = now or datetime.now(timezone.utc)
     value = get_source_state(conn, "discovery:global")
@@ -312,7 +372,8 @@ def _candidate(cluster: list[dict], profile: dict, query: str) -> dict:
 
 
 def collect_discovery_candidates(conn, config: dict, triggers: list[dict] | None = None) -> list[dict]:
-    if not config.get("BRAVE_SEARCH_API_KEY"):
+    provider, _ = discovery_provider(config)
+    if provider is None:
         return []
     now = datetime.now(timezone.utc)
     triggers = [item for item in (triggers or []) if item.get("score", 0) >= 80 and not item.get("suppress_notification") and item.get("source_kind") != "weather"]
@@ -324,7 +385,6 @@ def collect_discovery_candidates(conn, config: dict, triggers: list[dict] | None
         jobs, state = _scheduled_jobs(conn, config)
     if not jobs:
         return []
-    provider = BraveSearchProvider(config["BRAVE_SEARCH_API_KEY"])
     clusters: dict[str, list[dict]] = {}
     for job in jobs:
         profile = job["profile"]
