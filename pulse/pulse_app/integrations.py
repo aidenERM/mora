@@ -33,6 +33,10 @@ LOGGER = logging.getLogger("pulse.integrations")
 
 PROVIDERS = {
     "apple": "Apple companion",
+    "apple-calendar": "Apple Calendar",
+    "apple-contacts": "Apple Contacts",
+    "apple-mail": "Apple Mail",
+    "apple-music": "Apple Music",
     "google": "Google account",
     "gmail": "Gmail",
     "calendar": "Google Calendar",
@@ -59,7 +63,7 @@ def _safe_json(value, fallback=None):
 
 CONTEXT_MODES = {"home", "school", "outside", "travel", "sleep", "unknown"}
 CONTEXT_KINDS = {"mode", "calendar", "reminders", "health", "home", "music", "contacts", "weather", "location", "battery", "charging", "network", "sleep", "focus", "shortcut"}
-CONTEXT_SOURCE_PRIORITY = {"apple-companion": 5, "trusted-inference": 4, "shortcut": 3, "google-calendar": 2, "manual": 1}
+CONTEXT_SOURCE_PRIORITY = {"apple-companion": 5, "trusted-inference": 4, "shortcut": 3, "browser-location": 2.5, "google-calendar": 2, "manual": 1}
 
 
 def normalize_companion_payload(body: dict) -> dict:
@@ -83,9 +87,31 @@ def normalize_companion_payload(body: dict) -> dict:
         if kind in CONTEXT_KINDS and isinstance(value, dict):
             # Only derived, bounded context crosses the companion boundary.
             signals[kind] = {str(key)[:40]: str(item)[:160] for key, item in value.items() if key and item is not None}
+    if not expires_at and (mode != "unknown" or "location" in signals):
+        expires_at = _iso(_now() + timedelta(hours=2))
     permissions = body.get("permissions") if isinstance(body.get("permissions"), dict) else {}
     permissions = {str(key)[:40]: str(value)[:40] for key, value in permissions.items() if key and value is not None}
     return {"mode": mode, "confidence": confidence, "expires_at": expires_at, "signals": signals, "permissions": permissions}
+
+
+def normalize_location_payload(body: dict, max_age_minutes: int = 180) -> dict:
+    body = body if isinstance(body, dict) else {}
+    try:
+        latitude = float(body.get("latitude"))
+        longitude = float(body.get("longitude"))
+        accuracy = max(0.0, min(10000.0, float(body.get("accuracy", 0))))
+    except (TypeError, ValueError):
+        raise ValueError("invalid location")
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("invalid location")
+    observed_at = _now()
+    expires_at = observed_at + timedelta(minutes=max(15, min(1440, int(max_age_minutes))))
+    return {
+        "value": {"latitude": round(latitude, 3), "longitude": round(longitude, 3), "accuracy_m": round(accuracy, 1), "coarse": True},
+        "confidence": max(0.35, min(0.95, 1.0 - min(accuracy, 500.0) / 700.0)),
+        "observed_at": _iso(observed_at),
+        "expires_at": _iso(expires_at),
+    }
 
 
 def prepare_event_candidate(candidate: dict, contexts: list[dict] | None = None) -> dict:
@@ -102,6 +128,10 @@ def prepare_event_candidate(candidate: dict, contexts: list[dict] | None = None)
         boost, reason = 10, "travel context"
     elif topic in {"package", "purchase"} and "calendar" in context_kinds:
         boost, reason = 5, "calendar-aware preparation"
+    elif topic == "package" and mode in {"outside", "travel"}:
+        boost, reason = 5, "delivery while away"
+    elif topic == "weather" and "location" in context_kinds:
+        boost, reason = 5, "recent location context"
     elif topic in {"security", "school"} and mode == "school":
         boost, reason = 5, "school context"
     if (candidate.get("metadata") or {}).get("status_change"):
@@ -133,6 +163,10 @@ def provider_status(conn, config: dict) -> list[dict]:
             item["configured"] = bool(config.get("GOOGLE_CLIENT_ID") and config.get("GOOGLE_CLIENT_SECRET"))
         elif provider == "discord":
             item["configured"] = bool(config.get("DISCORD_CLIENT_ID") and config.get("DISCORD_CLIENT_SECRET"))
+        elif provider in {"apple-calendar", "apple-contacts", "apple-mail"}:
+            item["configured"] = bool(config.get("ICLOUD_APPLE_ID") and config.get("ICLOUD_APP_PASSWORD"))
+        elif provider == "apple-music":
+            item["configured"] = False
         elif provider == "aws-bedrock":
             bedrock = validate_config(config)
             item["configured"] = bool(bedrock["valid"])
@@ -376,7 +410,7 @@ def sync_provider(conn, config: dict, provider: str) -> dict:
         return sync_google(conn, config)
     if provider == "discord":
         return sync_discord(conn, config)
-    if provider == "apple":
+    if provider in {"apple", "apple-calendar", "apple-contacts", "apple-mail", "apple-music"}:
         return {"context": len(active_context(conn))}
     if provider == "aws-bedrock":
         return {"configured": bool(config.get("BEDROCK_MODEL_ID"))}

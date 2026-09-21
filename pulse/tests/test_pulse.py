@@ -4,6 +4,7 @@ import json
 import hashlib
 import hmac
 import sqlite3
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.integrations import classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, prepare_event_candidate
+from pulse_app.integrations import classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_location_payload, prepare_event_candidate
 from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record
 
 
@@ -90,6 +91,10 @@ def test_integrations_status_pairing_and_context(tmp_path):
     assert next(item for item in context.json["context"] if item["kind"] == "mode")["value"]["mode"] == "outside"
     assert client.get("/api/integrations").json["devices"][0]["metadata"]["permissions"]["calendar"] == "granted"
     assert client.post("/api/companion/context", json={"mode": "home"}, headers={"Authorization": "Bearer bad"}).status_code == 401
+    location = client.post("/api/location", json={"latitude": 6.031314, "longitude": -75.433331, "accuracy": 20})
+    assert location.status_code == 200
+    assert next(item for item in location.json["context"] if item["kind"] == "location")["value"]["coarse"] is True
+    assert client.delete("/api/location").status_code == 200
 
 
 def test_gmail_classification_and_lifecycle_storage(tmp_path):
@@ -172,6 +177,21 @@ def test_context_normalization_precedence_and_expiry(tmp_path):
     assert active_context(conn)[0]["value"]["mode"] == "outside"
     set_context_signal(conn, "battery", {"level": "0.1"}, "shortcut", 0.5, "2000-01-01T00:00:00+00:00")
     assert all(item["kind"] != "battery" for item in active_context(conn))
+
+
+def test_location_is_coarse_and_expires(tmp_path):
+    location = normalize_location_payload({"latitude": 6.031314, "longitude": -75.433331, "accuracy": 18}, 30)
+    assert location["value"] == {"latitude": 6.031, "longitude": -75.433, "accuracy_m": 18.0, "coarse": True}
+    assert location["expires_at"] > location["observed_at"]
+    with pytest.raises(ValueError):
+        normalize_location_payload({"latitude": 120, "longitude": 0}, 30)
+
+
+def test_recent_location_context_can_raise_weather_relevance():
+    candidate = {"topic": "weather", "score": 84, "metadata": {}, "body": "rain"}
+    prepared = prepare_event_candidate(candidate, [{"kind": "location", "value": {"coarse": True}}])
+    assert prepared["score"] == 89
+    assert prepared["metadata"]["score_components"]["context_preparation"] == 5
 
 
 def test_package_and_purchase_state_merges_and_suppresses_duplicates(tmp_path):
@@ -575,6 +595,7 @@ def test_rolling_ceiling_and_safety_bypass_are_in_shared_decision_trace(tmp_path
     conn = connect(database)
     config = load_config({
         "DATABASE_PATH": str(database),
+        "TIMEZONE": "UTC", "QUIET_START": "00:00", "QUIET_END": "00:00",
         "NOTIFICATION_COOLDOWNS": {"warzone": 0, "earthquake": 0},
         "ROLLING_NOTIFICATION_LIMITS": {"global": {"count": 1, "minutes": 60}, "topic": {}, "tier": {}},
     })

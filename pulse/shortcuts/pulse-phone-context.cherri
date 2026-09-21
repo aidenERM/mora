@@ -16,13 +16,15 @@ const currentLocationValue = getCurrentLocation()
 const latitude = getLocationDetail(currentLocationValue, 'Latitude')
 const longitude = getLocationDetail(currentLocationValue, 'Longitude')
 const context = {
-  "battery": getBatteryLevel(),
-  "charging": isCharging(),
-  "latitude": latitude,
-  "longitude": longitude
+  "mode": "outside",
+  "confidence": 0.8,
+  "signals": {
+    "battery": {"level": getBatteryLevel(), "charging": isCharging()},
+    "location": {"latitude": latitude, "longitude": longitude}
+  }
 }
 const response = jsonRequest(
-  "https://pulse.moralife.uk/api/shortcut/check",
+  "https://pulse.moralife.uk/api/shortcut/context",
   "POST",
   context,
   {"X-Pulse-Shortcut-Token": "REPLACE_WITH_SHORTCUT_TOKEN"}

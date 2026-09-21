@@ -43,6 +43,7 @@ from .storage import (
     save_subscription,
     set_reminder,
     clear_reminder,
+    clear_context_signals,
     upsert_event,
 )
 from .worker import _payload
@@ -60,6 +61,7 @@ from .integrations import (
     provider_status,
     sync_provider,
     normalize_companion_payload,
+    normalize_location_payload,
 )
 from .storage import companion_device, create_pairing_challenge, list_companion_devices, redeem_pairing_challenge, save_integration, set_context_signal, update_companion_metadata
 
@@ -356,6 +358,24 @@ def create_app(test_config: dict | None = None) -> Flask:
     @require_auth
     def context_status():
         return jsonify(context=active_context(db()))
+
+    @app.post("/api/location")
+    @require_auth
+    def browser_location():
+        try:
+            location = normalize_location_payload(_json_body(), config["LOCATION_MAX_AGE_MINUTES"])
+        except (TypeError, ValueError) as exc:
+            return jsonify(error=str(exc)), 400
+        set_context_signal(db(), "location", location["value"], "browser-location", location["confidence"], location["expires_at"])
+        db().commit()
+        return jsonify(ok=True, location={"accuracy_m": location["value"]["accuracy_m"], "coarse": True, "expires_at": location["expires_at"]}, context=active_context(db()))
+
+    @app.delete("/api/location")
+    @require_auth
+    def clear_browser_location():
+        clear_context_signals(db(), kind="location", source="browser-location")
+        db().commit()
+        return jsonify(ok=True, context=active_context(db()))
 
     @app.post("/api/companion/pair/start")
     @require_auth

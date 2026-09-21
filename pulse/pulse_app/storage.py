@@ -308,6 +308,21 @@ def set_context_signal(conn: sqlite3.Connection, kind: str, value: dict, source:
     return marker
 
 
+def clear_context_signals(conn: sqlite3.Connection, kind: str | None = None, source: str | None = None) -> None:
+    clauses = []
+    values = []
+    if kind:
+        clauses.append("kind=?")
+        values.append(kind)
+    if source:
+        clauses.append("source=?")
+        values.append(source)
+    if not clauses:
+        conn.execute("DELETE FROM context_signals")
+    else:
+        conn.execute("DELETE FROM context_signals WHERE " + " AND ".join(clauses), values)
+
+
 def create_pairing_challenge(conn: sqlite3.Connection, minutes: int = 10) -> tuple[str, str]:
     code = "-".join([secrets.token_hex(2).upper(), secrets.token_hex(2).upper()])
     challenge_id = secrets.token_urlsafe(16)

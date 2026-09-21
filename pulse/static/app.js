@@ -251,6 +251,9 @@ function integrationSetupBanner() {
   const params = new URLSearchParams(location.search);
   const connected = params.get("connected");
   const oauthError = params.get("oauth_error");
+  const googleConnected = state.integrations.some((entry) => entry.provider === "google" && entry.connection_state === "connected");
+  const discordConnected = state.integrations.some((entry) => entry.provider === "discord" && entry.connection_state === "connected");
+  if (!connected && !oauthError && googleConnected && discordConnected) return `<p class="integration-message success">Google and Discord are connected. Manage them below.</p>`;
   const message = connected === "google"
     ? "Google connected. Pulse can now sync Gmail, Calendar, and contacts."
     : connected === "discord"
@@ -259,28 +262,38 @@ function integrationSetupBanner() {
         ? "That connection did not finish. Try the button again, then approve the requested access."
         : "Choose an account below. Pulse will open the official authorization screen, then return here.";
   const messageClass = connected ? "integration-message success" : oauthError ? "integration-message error" : "integration-message";
-  return `<section class="integration-setup"><div><span class="eyebrow">first-time setup</span><h2>connect your accounts</h2><p>${escapeHtml(message)}</p></div><div class="integration-setup-actions"><a class="button" href="/api/integrations/google/connect">connect Google</a><a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a></div></section><p class="${messageClass}">${connected ? "connection saved securely on the server" : oauthError ? "no credentials were changed" : "you can disconnect either account later"}</p>`;
+  const actions = `${googleConnected ? "" : `<a class="button" href="/api/integrations/google/connect">connect Google</a>`}${discordConnected ? "" : `<a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a>`}`;
+  return `<section class="integration-setup"><div><span class="eyebrow">account setup</span><h2>${googleConnected || discordConnected ? "connect another account" : "connect your accounts"}</h2><p>${escapeHtml(message)}</p></div><div class="integration-setup-actions">${actions}</div></section><p class="${messageClass}">${connected ? "connection saved securely on the server" : oauthError ? "no credentials were changed" : "you can manage or disconnect accounts below"}</p>`;
 }
 
 function renderIntegrations() {
   document.title = "Pulse · integrations";
   const item = (provider) => (state.integrations || []).find((entry) => entry.provider === provider) || { provider, label: provider, metadata: {} };
-  const status = (entry) => entry.connection_state === "connected" ? "connected" : entry.connection_state === "error" ? "needs attention" : entry.configured ? "needs setup" : "not configured";
-  const header = (entry, label) => `<div class="diagnostic-row"><span><strong>${escapeHtml(label || entry.label)}</strong><small>${escapeHtml(status(entry))}${entry.last_error ? " · " + escapeHtml(entry.last_error) : ""}</small></span><span class="status-dot ${entry.connection_state === "connected" ? "active" : "muted-dot"}></span></div>`;
+  const status = (entry) => entry.connection_state === "connected" ? { label: "Connected", icon: "✓", className: "connected" } : entry.connection_state === "error" ? { label: "Needs attention", icon: "!", className: "attention" } : entry.configured ? { label: "Needs setup", icon: "○", className: "setup" } : { label: "Not configured", icon: "—", className: "muted" };
+  const badge = (entry) => { const value = status(entry); return `<span class="provider-status ${value.className}"><span>${value.icon}</span>${value.label}</span>`; };
+  const service = (entry, label) => `<span class="service-chip ${entry.connection_state === "connected" ? "is-connected" : ""}">${entry.connection_state === "connected" ? "✓" : "○"} ${escapeHtml(label)}</span>`;
+  const disconnect = (provider) => `<button class="button ghost-button" data-action="integration-disconnect" data-provider="${provider}">disconnect</button>`;
+  const sync = (provider) => `<button class="button secondary" data-action="integration-sync" data-provider="${provider}">sync now</button>`;
+  const connect = (provider, label) => `<a class="button" href="/api/integrations/${provider}/connect">${label}</a>`;
   const apple = item("apple");
+  const appleCalendar = item("apple-calendar");
+  const appleContacts = item("apple-contacts");
+  const appleMail = item("apple-mail");
+  const appleMusic = item("apple-music");
   const google = item("google");
   const gmail = item("gmail");
   const calendar = item("calendar");
   const discord = item("discord");
   const aws = item("aws-bedrock");
-  const appleFeatures = ["Companion", "Calendar", "Reminders", "Health", "Home", "Music", "Contacts", "Weather", "Location", "Shortcuts"].map((label) => `<span class="confidence ${apple.metadata?.permissions?.[label.toLowerCase()] === "granted" ? "confidence-confirmed" : ""}">${escapeHtml(label)} · ${apple.metadata?.permissions?.[label.toLowerCase()] || "setup"}</span>`).join(" · ");
-  const devices = (state.devices || []).map((device) => `<div class="diagnostic-row"><span>${escapeHtml(device.label)}<small>${device.last_seen_at ? "last sync " + escapeHtml(formatDate(device.last_seen_at)) : "never synced"}</small></span><strong>${device.active ? "active" : "revoked"}</strong></div>`).join("") || `<p class="fine-print">no iPhone companion paired</p>`;
-  const cards = `<section class="rules-card"><div class="rules-body"><div class="eyebrow">apple companion</div>${header(apple, "Apple")}</div><div class="rules-body"><p class="field-note">Derived context only. Raw health, contacts, location, and home data stay on the device.</p><p class="fine-print">${appleFeatures}</p>${devices}<div class="feedback-row"><button class="button secondary" data-action="pair-companion">pair iPhone</button><button class="button ghost-button" data-action="integration-test" data-provider="apple">test backend</button></div></div></section>`
-    + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">google</div>${header(google, "Google account")}<p class="field-note">Read-only Gmail and Calendar. Gmail: ${escapeHtml(status(gmail))}. Calendar: ${escapeHtml(status(calendar))}.</p><div class="feedback-row"><a class="button secondary" href="/api/integrations/google/connect">connect Google</a><button class="button ghost-button" data-action="integration-sync" data-provider="google">sync now</button>${google.has_credentials ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="google">disconnect</button>` : ""}</div></div></section>`
-    + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">discord</div>${header(discord, "Discord")}<p class="field-note">Official OAuth only: identity and selected server context, never generic chat history.</p><div class="feedback-row"><a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a><button class="button ghost-button" data-action="integration-test" data-provider="discord">test</button>${discord.has_credentials ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="discord">disconnect</button>` : ""}</div></div></section>`
-    + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">aws ai</div>${header(aws, "AWS Bedrock")}<p class="field-note">region: ${escapeHtml(aws.metadata?.region || "us-east-1")} · model: ${escapeHtml(aws.metadata?.model || state.config?.bedrock_model_id || "openai.gpt-5.6-luna")} · credentials: ${aws.metadata?.credentials_present ? "present" : "missing"}</p><p class="fine-print">AI is optional. Deterministic scoring continues when Bedrock is unavailable.</p><button class="button secondary" data-action="integration-test" data-provider="aws-bedrock">test AI</button></div></section>`;
-  const contextRows = (state.context || []).map((item) => `<div class="diagnostic-row"><span>${escapeHtml(item.kind)}<small>${escapeHtml(item.source)}</small></span><strong>${escapeHtml(JSON.stringify(item.value))}</strong></div>`).join("") || `<p class="fine-print">no companion context has been received</p>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect only the context Pulse can use to make a better decision. credentials stay server-side.</p>${integrationSetupBanner()}${cards}<section class="quality-card diagnostics"><span class="eyebrow">active context</span>${contextRows}</section><a class="button ghost-button full" href="/">back to history</a>`;
+  const location = (state.context || []).find((entry) => entry.kind === "location");
+  const locationText = location ? `updated ${formatDate(location.observed_at)}` : "not shared";
+  const cards = `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon">G</div><div><h2>Google</h2>${badge(google)}</div></div>${google.connection_state === "connected" ? `<span class="provider-check">✓</span>` : ""}</div><div class="service-list">${service(gmail, "Gmail")}${service(calendar, "Calendar")}${service(google, "Contacts")}</div><div class="provider-actions">${google.connection_state === "connected" ? `${sync("google")}${disconnect("google")}` : connect("google", "connect Google")}</div></section>`
+    + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon discord-icon">D</div><div><h2>Discord</h2>${badge(discord)}</div></div>${discord.connection_state === "connected" ? `<span class="provider-check">✓</span>` : ""}</div><p class="provider-note">Account and server access only. Pulse does not read general chat history.</p><div class="provider-actions">${discord.connection_state === "connected" ? disconnect("discord") : connect("discord", "connect Discord")}</div></section>`
+    + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon apple-icon">⌘</div><div><h2>Apple</h2>${badge(apple.connection_state === "connected" ? apple : appleCalendar)}</div></div></div><div class="service-list">${service(appleCalendar, "Calendar")}${service(appleContacts, "Contacts")}${service(appleMail, "Mail")}${service(appleMusic, "Music")}${service(apple, "Shortcuts / context")}</div><div class="provider-actions"><button class="button" data-action="apple-setup">set up Apple access</button><button class="button secondary" data-action="pair-companion">pair iPhone</button></div><p class="provider-note">Use an Apple app-specific password for Calendar, Contacts, and Mail. Music stays optional.</p></section>`
+    + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon aws-icon">AI</div><div><h2>AWS AI</h2>${badge(aws)}</div></div></div><p class="provider-note">GPT-5.6 Luna · ${escapeHtml(aws.metadata?.region || "us-east-1")}</p><div class="provider-actions"><button class="button secondary" data-action="integration-test" data-provider="aws-bedrock">test Luna</button></div><details class="provider-details"><summary>technical details</summary><p>model ${escapeHtml(aws.metadata?.model || state.config?.bedrock_model_id || "configured")}. Deterministic scoring remains active if AI fails.</p></details></section>`
+    + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon location-icon">⌖</div><div><h2>Location context</h2><span class="provider-status ${location ? "connected" : "setup"}"><span>${location ? "✓" : "○"}</span>${location ? "Active" : "Not shared"}</span></div></div></div><p class="provider-note">Coarse, temporary location only. ${escapeHtml(locationText)}.</p><div class="provider-actions"><button class="button" data-action="location-permission">use current location</button>${location ? `<button class="button ghost-button" data-action="clear-location">clear</button>` : ""}</div></section>`;
+  const contextRows = (state.context || []).filter((entry) => entry.kind !== "location").map((entry) => `<div class="diagnostic-row"><span>${escapeHtml(entry.kind)}<small>${escapeHtml(entry.source)}</small></span><strong>${escapeHtml(JSON.stringify(entry.value))}</strong></div>`).join("") || `<p class="fine-print">no other context has been received</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect the context Pulse can use. provider details stay simple; technical diagnostics are tucked away.</p>${integrationSetupBanner()}<div class="provider-grid">${cards}</div><details class="quality-card diagnostics"><summary>debug and active context</summary>${contextRows}</details><a class="button ghost-button full" href="/">back to history</a>`;
 }
 
 function renderHome() {
@@ -447,6 +460,20 @@ document.addEventListener("click", async (event) => {
       const result = await api("/api/companion/pair/start", { method: "POST", body: "{}" });
       window.prompt("enter this one-time code in the Pulse companion app", result.code);
     }
+    if (action === "location-permission") {
+      if (!navigator.geolocation) throw new Error("this browser does not provide location");
+      navigator.geolocation.getCurrentPosition(async (position) => {
+        try {
+          await api("/api/location", { method: "POST", body: JSON.stringify({ latitude: position.coords.latitude, longitude: position.coords.longitude, accuracy: position.coords.accuracy }) });
+          await loadAuthenticatedState(); renderIntegrations(); showToast("coarse location saved temporarily");
+        } catch (error) { showToast(error.message, true); }
+      }, (error) => showToast(error.code === 1 ? "location permission was not granted" : "location could not be read", true), { enableHighAccuracy: false, maximumAge: 300000, timeout: 10000 });
+    }
+    if (action === "clear-location") {
+      await api("/api/location", { method: "DELETE", body: "{}" });
+      await loadAuthenticatedState(); renderIntegrations(); showToast("location context cleared");
+    }
+    if (action === "apple-setup") showToast("Apple web access needs an app-specific password in the secure server environment.");
   } catch (error) {
     showToast(error.message, true);
   }

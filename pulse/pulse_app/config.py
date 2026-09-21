@@ -228,6 +228,7 @@ def load_config(test_config: dict | None = None) -> dict:
         "WEATHER_RAIN_PROBABILITY": max(60, min(100, int(os.environ.get("PULSE_WEATHER_RAIN_PROBABILITY", "75")))),
         "WEATHER_RAIN_MM": max(0.5, float(os.environ.get("PULSE_WEATHER_RAIN_MM", "5"))),
         "WEATHER_WIND_KMH": max(30, float(os.environ.get("PULSE_WEATHER_WIND_KMH", "50"))),
+        "LOCATION_MAX_AGE_MINUTES": max(15, min(1440, int(os.environ.get("PULSE_LOCATION_MAX_AGE_MINUTES", "180")))),
         "EARTHQUAKE_ENABLED": _bool("PULSE_EARTHQUAKE_ENABLED", True),
         "EARTHQUAKE_FEED_URL": os.environ.get("PULSE_EARTHQUAKE_FEED_URL", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"),
         "EARTHQUAKE_LOCAL_RADIUS_KM": max(50, float(os.environ.get("PULSE_EARTHQUAKE_LOCAL_RADIUS_KM", "400"))),
@@ -262,6 +263,11 @@ def load_config(test_config: dict | None = None) -> dict:
         "DISCORD_CLIENT_ID": os.environ.get("PULSE_DISCORD_CLIENT_ID", ""),
         "DISCORD_CLIENT_SECRET": os.environ.get("PULSE_DISCORD_CLIENT_SECRET", ""),
         "DISCORD_REDIRECT_URI": os.environ.get("PULSE_DISCORD_REDIRECT_URI", "https://pulse.moralife.uk/api/integrations/discord/callback"),
+        "ICLOUD_APPLE_ID": os.environ.get("PULSE_ICLOUD_APPLE_ID", ""),
+        "ICLOUD_APP_PASSWORD": os.environ.get("PULSE_ICLOUD_APP_PASSWORD", ""),
+        "ICLOUD_CALDAV_URL": os.environ.get("PULSE_ICLOUD_CALDAV_URL", "https://caldav.icloud.com"),
+        "ICLOUD_CARDDAV_URL": os.environ.get("PULSE_ICLOUD_CARDDAV_URL", "https://contacts.icloud.com"),
+        "ICLOUD_IMAP_HOST": os.environ.get("PULSE_ICLOUD_IMAP_HOST", "imap.mail.me.com"),
         "SESSION_SECRET": os.environ.get("PULSE_SECRET_KEY") or secrets.token_urlsafe(32),
     }
     if test_config:
