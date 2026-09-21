@@ -264,6 +264,16 @@ def test_default_high_value_sources_are_official_and_domain_scoped():
     assert configured["discord-blog"]["trust"] == "primary"
 
 
+def test_personal_discovery_profiles_keep_domains_separate():
+    profiles = {item["id"]: item for item in load_config({})["SEARCH_PROFILES"]}
+    assert profiles["instagram-discovery"]["topic"] == "instagram"
+    assert profiles["discord-discovery"]["topic"] == "discord"
+    assert profiles["rocket-league-discovery"]["topic"] == "rocket_league"
+    assert profiles["unstable-smp-discovery"]["topic"] == "unstable_smp"
+    assert all("discord" not in " ".join(profiles[key]["queries"]).casefold() for key in ("instagram-discovery",))
+    assert all("unstable" not in " ".join(profiles[key]["queries"]).casefold() for key in ("rocket-league-discovery",))
+
+
 def test_notification_route_is_exact_event_route():
     sw = Path(__file__).resolve().parents[1] / "static" / "sw.js"
     source = sw.read_text(encoding="utf-8")
