@@ -13,7 +13,7 @@ from werkzeug.security import generate_password_hash
 from pulse_app.app import create_app
 from pulse_app import discovery, sources
 from pulse_app.config import load_config
-from pulse_app.rules import apply_preference_adjustments, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
+from pulse_app.rules import apply_preference_adjustments, domain_adjustment, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
 from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
@@ -276,6 +276,12 @@ def test_personal_discovery_profiles_keep_domains_separate():
     assert profiles["unstable-smp-discovery"]["topic"] == "unstable_smp"
     assert all("discord" not in " ".join(profiles[key]["queries"]).casefold() for key in ("instagram-discovery",))
     assert all("unstable" not in " ".join(profiles[key]["queries"]).casefold() for key in ("rocket-league-discovery",))
+
+
+def test_openai_profile_rejects_editorial_case_studies_but_keeps_product_changes():
+    low, _ = domain_adjustment({"topic": "openai", "title": "How a researcher uses ChatGPT", "summary": "A case study about adoption."})
+    high, _ = domain_adjustment({"topic": "openai", "title": "Introducing ChatGPT Images", "summary": "A new model release and availability update."})
+    assert low < 0 and high > 0
 
 
 def test_notification_route_is_exact_event_route():

@@ -161,7 +161,14 @@ def domain_adjustment(candidate: dict) -> tuple[int, str]:
             return 8, "gaming impact signal"
         if any(term in text for term in low_value):
             return -14, "gaming low-value signal"
-    if topic in {"openai", "ios", "instagram", "rocket_league", "unstable_smp"}:
+    if topic == "openai":
+        useful = ("introducing chatgpt", "introducing gpt", "new model", "security", "outage", "availability", "pricing", "service", "api", "codex")
+        low_value = ("how ", "case study", "research", "workers", "journalism", "funding", "joins", "supporting", "financial services", "built ", "accelerating", "older adults")
+        if any(term in text for term in low_value):
+            return -18, "openai low-value editorial signal"
+        if any(term in text for term in useful):
+            return 8, "openai product or safety signal"
+    if topic in {"ios", "instagram", "rocket_league", "unstable_smp"}:
         useful = ("release", "released", "official", "security", "outage", "beta", "season", "update", "announcement", "confirmed")
         low_value = ("rumor", "concept", "leak", "speculation", "cosmetic", "bundle")
         if any(term in text for term in useful):
