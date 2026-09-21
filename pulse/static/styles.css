@@ -204,6 +204,10 @@ output { color: var(--cyan); font-size: .8rem; text-align: right; }
 .pairing-code { display: grid; gap: .65rem; margin-top: 1rem; padding: .8rem; border: 1px solid var(--line-bright); border-radius: 13px; background: var(--cyan-soft); }
 .pairing-code .input-row { grid-template-columns: 1fr auto; }
 .pairing-code input { color: var(--cyan); font-weight: 800; letter-spacing: .12em; text-align: center; }
+.people-disclosure { cursor: default; }
+.people-disclosure summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; list-style: none; }
+.people-disclosure summary::-webkit-details-marker { display: none; }
+.people-disclosure summary strong { display: block; margin-top: .35rem; font-size: .98rem; }
 
 /* phone-first 0.2 surface */
 :root { --bg: #07090d; --panel-solid: #11151c; --line: rgba(190, 205, 224, .13); --line-bright: rgba(150, 220, 255, .38); --cyan: #a8e4ff; --cyan-soft: rgba(168, 228, 255, .09); --radius: 18px; }
