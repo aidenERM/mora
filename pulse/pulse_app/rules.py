@@ -168,6 +168,10 @@ def domain_adjustment(candidate: dict) -> tuple[int, str]:
             return -18, "openai low-value editorial signal"
         if any(term in text for term in useful):
             return 8, "openai product or safety signal"
+    if topic == "ios" and "unconfirmed" in text:
+        return -14, "unconfirmed iOS signal"
+    if topic == "ios" and "leak" in text and "confirmed" in text:
+        return 8, "confirmed pre-release iOS signal"
     if topic in {"ios", "instagram", "rocket_league", "unstable_smp"}:
         useful = ("release", "released", "official", "security", "outage", "beta", "season", "update", "announcement", "confirmed")
         low_value = ("rumor", "concept", "leak", "speculation", "cosmetic", "bundle")

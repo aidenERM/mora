@@ -297,6 +297,12 @@ def test_openai_profile_rejects_editorial_case_studies_but_keeps_product_changes
     assert low < 0 and high > 0
 
 
+def test_ios_only_allows_confirmed_leaks():
+    rumor, _ = domain_adjustment({"topic": "ios", "title": "iOS leak", "summary": "An unconfirmed rumor."})
+    confirmed, _ = domain_adjustment({"topic": "ios", "title": "Confirmed iOS leak", "summary": "Apple confirmed the feature."})
+    assert rumor < 0 and confirmed > 0
+
+
 def test_notification_route_is_exact_event_route():
     sw = Path(__file__).resolve().parents[1] / "static" / "sw.js"
     source = sw.read_text(encoding="utf-8")

@@ -148,7 +148,7 @@ DEFAULT_SEARCH_PROFILES = [
         "label": "iOS and Apple software",
         "topic": "ios",
         "queries": ["site:apple.com/newsroom iOS beta release", "iOS beta official release notes", "Apple confirmed iOS feature"],
-        "keywords": ["ios", "beta", "release", "security", "official", "apple"],
+        "keywords": ["ios", "beta", "release", "security", "official", "apple", "leak", "confirmed"],
         "active": True,
     },
     {
