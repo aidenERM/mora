@@ -379,6 +379,33 @@ def _calendar_data(response_text: str) -> list[dict]:
     return results
 
 
+def _contact_data(response_text: str) -> list[dict]:
+    try:
+        root = ElementTree.fromstring(response_text)
+    except ElementTree.ParseError:
+        return []
+    contacts = []
+    for node in root.iter():
+        if not node.tag.endswith("address-data") or not node.text:
+            continue
+        fields = {"emails": [], "phones": []}
+        for raw in node.text.replace("\r\n ", "").replace("\r\n\t", "").splitlines():
+            if ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            key = key.split(";", 1)[0].upper()
+            if key == "FN":
+                fields["fn"] = value.strip()
+            elif key == "UID":
+                fields["uid"] = value.strip()
+            elif key == "EMAIL":
+                fields["emails"].append(value.strip())
+            elif key == "TEL":
+                fields["phones"].append(value.strip())
+        contacts.append(normalize_icloud_contact(fields))
+    return contacts
+
+
 def _sync_icloud_calendar(conn, config: dict, credentials: dict) -> dict:
     propfind = """<?xml version="1.0"?><propfind xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><prop><current-user-principal/><c:calendar-home-set/></prop></propfind>"""
     root_response = _icloud_request("PROPFIND", config["ICLOUD_CALDAV_URL"], credentials, propfind, {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
@@ -434,8 +461,19 @@ def _sync_icloud_contacts(conn, config: dict, credentials: dict) -> dict:
         home = urljoin(config["ICLOUD_CARDDAV_URL"].rstrip("/") + "/", home)
     collection = _icloud_request("PROPFIND", home, credentials, "<propfind xmlns=\"DAV:\"><prop><displayname/><resourcetype/></prop></propfind>", {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
     addressbooks = [href for href in _hrefs(collection.text) if href.rstrip("/") != home.rstrip("/")]
-    mark_success(conn, "apple-contacts", {"addressbooks": len(addressbooks)})
-    return {"addressbooks": len(addressbooks)}
+    contact_query = "<c:addressbook-query xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:carddav\"><d:prop><c:address-data/></d:prop></c:addressbook-query>"
+    contact_count = 0
+    for addressbook_url in addressbooks[:20]:
+        if addressbook_url.startswith("/"):
+            addressbook_url = urljoin(config["ICLOUD_CARDDAV_URL"].rstrip("/") + "/", addressbook_url)
+        try:
+            contact_response = _icloud_request("REPORT", addressbook_url, credentials, contact_query, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+            contact_count += len(_contact_data(contact_response.text))
+        except requests.RequestException:
+            continue
+    set_context_signal(conn, "contacts", {"count": contact_count}, "apple-contacts", 0.7, _iso(_now() + timedelta(days=1)))
+    mark_success(conn, "apple-contacts", {"addressbooks": len(addressbooks), "contacts": contact_count})
+    return {"addressbooks": len(addressbooks), "contacts": contact_count}
 
 
 def _apple_mail_event(item: dict, config: dict, preferences: dict, contexts: list[dict] | None = None) -> dict:
