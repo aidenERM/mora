@@ -323,7 +323,9 @@ async function renderAppleSetup() {
 
 function renderHome() {
   document.title = "Pulse · quiet signals";
-  const importantEvents = state.events.filter((item) => item.notified_at || ["critical", "high"].includes(item.priority));
+  // History is intentionally broader than the home feed. A high score alone
+  // is not proof that Pulse pushed or that the event is still useful.
+  const importantEvents = state.events.filter((item) => Boolean(item.notified_at));
   const baseEvents = state.showAllHistory ? state.events : importantEvents;
   const visibleEvents = state.activeTopic === "all" ? baseEvents : baseEvents.filter((item) => item.topic === state.activeTopic);
   const events = visibleEvents.length ? visibleEvents.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing here yet</h2><p>Pulse keeps the feed quiet until something crosses your rules.</p></div>`;
