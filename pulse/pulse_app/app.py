@@ -374,7 +374,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         except ValueError:
             limit = 100
         near_only = request.args.get("near_threshold", "0").lower() in {"1", "true", "yes"}
-        return jsonify(decisions=list_notification_decisions(db(), limit, near_only))
+        suppressed_only = request.args.get("suppressed_only", "0").lower() in {"1", "true", "yes"}
+        return jsonify(decisions=list_notification_decisions(db(), limit, near_only, suppressed_only))
 
     @app.post("/api/debug/simulate")
     @require_auth

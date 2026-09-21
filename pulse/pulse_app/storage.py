@@ -132,6 +132,9 @@ CREATE TABLE IF NOT EXISTS event_decisions (
     threshold INTEGER NOT NULL,
     tier TEXT NOT NULL,
     near_threshold INTEGER NOT NULL DEFAULT 0,
+    distance_from_threshold INTEGER NOT NULL DEFAULT 0,
+    later_became_important INTEGER NOT NULL DEFAULT 0,
+    later_development_notified INTEGER NOT NULL DEFAULT 0,
     trace TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_event_decisions_recent ON event_decisions(evaluated_at DESC, near_threshold, allowed);
@@ -192,6 +195,15 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
             # Existing unreviewed rows must remain history, not become a push storm
             # on the first stricter worker run.
             conn.execute("UPDATE events SET notification_pending=0")
+        decision_columns = {row[1] for row in conn.execute("PRAGMA table_info(event_decisions)").fetchall()}
+        decision_migrations = {
+            "distance_from_threshold": "INTEGER NOT NULL DEFAULT 0",
+            "later_became_important": "INTEGER NOT NULL DEFAULT 0",
+            "later_development_notified": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in decision_migrations.items():
+            if name not in decision_columns:
+                conn.execute(f"ALTER TABLE event_decisions ADD COLUMN {name} {definition}")
         for row in conn.execute("SELECT * FROM events WHERE canonical_event_id='' OR content_hash='' OR (notified_at IS NOT NULL AND notification_count=0)").fetchall():
             item = event_from_row(row)
             fingerprint = event_fingerprint(item)
@@ -623,7 +635,9 @@ def upsert_event(conn: sqlite3.Connection, event: dict) -> tuple[dict, bool]:
             if existing_item.get(key):
                 event[key] = existing_item[key]
     if existing:
-        event["development_meaningful"] = materially_changed(event_from_row(existing), event)
+        event["development_meaningful"] = materially_changed(event_from_row(existing), event) or bool((event.get("metadata") or {}).get("development_meaningful"))
+    development_meaningful = event.get("development_meaningful", (event.get("metadata") or {}).get("development_meaningful", False))
+    event["metadata"] = {**(event.get("metadata") or {}), "development_meaningful": bool(development_meaningful)}
     event = _ensure_canonical_model(conn, event)
     if existing:
         old = event_from_row(existing)
@@ -673,6 +687,26 @@ def mark_notified(conn: sqlite3.Connection, event_id: str) -> None:
         "UPDATE events SET notified_at=COALESCE(notified_at,?),last_notification_at=?,notification_pending=0,notification_count=notification_count+1,notified_hash=content_hash,notification_reason=?,decision_trace=? WHERE id=?",
         (now, now, "sent", json.dumps(trace, separators=(",", ":")), event_id),
     )
+    identity = conn.execute("SELECT canonical_event_id,cluster_id,development_id FROM events WHERE id=?", (event_id,)).fetchone()
+    if identity:
+        rows = conn.execute(
+            "SELECT id,trace FROM event_decisions WHERE allowed=0 AND evaluated_at<=? AND (canonical_event_id=? OR (cluster_id!='' AND cluster_id=?))",
+            (now, identity["canonical_event_id"], identity["cluster_id"]),
+        ).fetchall()
+        for decision in rows:
+            try:
+                prior_trace = json.loads(decision["trace"] or "{}")
+            except json.JSONDecodeError:
+                prior_trace = {}
+            later_development = bool(identity["development_id"] and prior_trace.get("development_id") and prior_trace.get("development_id") != identity["development_id"])
+            prior_trace.update({
+                "later_became_important": True,
+                "later_development_notified": bool(prior_trace.get("later_development_notified") or later_development),
+            })
+            conn.execute(
+                "UPDATE event_decisions SET later_became_important=1,later_development_notified=MAX(later_development_notified,?),trace=? WHERE id=?",
+                (int(later_development), json.dumps(prior_trace, separators=(",", ":")), decision["id"]),
+            )
 
 
 def mark_notification_suppressed(conn: sqlite3.Connection, event_id: str, reason: str) -> None:
@@ -686,7 +720,9 @@ def record_notification_decision(conn: sqlite3.Connection, event: dict, allowed:
     now = utc_now()
     threshold = int(trace.get("threshold", 0))
     score = int(trace.get("effective_score", event.get("score", 0)))
-    near = int(score >= max(0, threshold - 15))
+    distance = score - threshold
+    near = int(distance >= -15)
+    trace = {**trace, "distance_from_threshold": distance, "near_threshold": bool(near), "later_became_important": False, "later_development_notified": False}
     conn.execute(
         "UPDATE events SET decision_trace=?,notification_reason=? WHERE id=?",
         (json.dumps(trace, separators=(",", ":")), "" if allowed else reason[:120], event["id"]),
@@ -697,14 +733,22 @@ def record_notification_decision(conn: sqlite3.Connection, event: dict, allowed:
     ).fetchone()
     if not recent:
         conn.execute(
-            "INSERT INTO event_decisions(event_id,canonical_event_id,cluster_id,evaluated_at,allowed,reason,score,threshold,tier,near_threshold,trace) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (event["id"], event.get("canonical_event_id", ""), event.get("cluster_id", ""), now, int(allowed), reason[:160], score, threshold, str(trace.get("notification_tier", "low")), near, json.dumps(trace, separators=(",", ":"))),
+            "INSERT INTO event_decisions(event_id,canonical_event_id,cluster_id,evaluated_at,allowed,reason,score,threshold,tier,near_threshold,distance_from_threshold,later_became_important,later_development_notified,trace) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (event["id"], event.get("canonical_event_id", ""), event.get("cluster_id", ""), now, int(allowed), reason[:160], score, threshold, str(trace.get("notification_tier", "low")), near, distance, 0, 0, json.dumps(trace, separators=(",", ":"))),
         )
 
 
-def list_notification_decisions(conn: sqlite3.Connection, limit: int = 100, near_only: bool = False) -> list[dict]:
-    clause = " WHERE near_threshold=1" if near_only else ""
-    rows = conn.execute(f"SELECT * FROM event_decisions{clause} ORDER BY evaluated_at DESC LIMIT ?", (max(1, min(int(limit), 500)),)).fetchall()
+def list_notification_decisions(conn: sqlite3.Connection, limit: int = 100, near_only: bool = False, suppressed_only: bool = False) -> list[dict]:
+    clauses = []
+    if near_only:
+        clauses.append("d.near_threshold=1")
+    if suppressed_only:
+        clauses.append("d.allowed=0")
+    clause = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        f"SELECT d.*,e.topic,e.title,e.normalized_title AS event_normalized_title,e.priority,e.notification_reason AS current_notification_reason FROM event_decisions d LEFT JOIN events e ON e.id=d.event_id{clause} ORDER BY d.evaluated_at DESC LIMIT ?",
+        (max(1, min(int(limit), 500)),),
+    ).fetchall()
     result = []
     for row in rows:
         item = dict(row)
@@ -714,6 +758,8 @@ def list_notification_decisions(conn: sqlite3.Connection, limit: int = 100, near
             item["trace"] = {}
         item["allowed"] = bool(item["allowed"])
         item["near_threshold"] = bool(item["near_threshold"])
+        item["later_became_important"] = bool(item.get("later_became_important"))
+        item["later_development_notified"] = bool(item.get("later_development_notified"))
         result.append(item)
     return result
 

@@ -472,6 +472,141 @@ def _cooldown_details(event: dict, now: datetime, config: dict, conn=None) -> di
     return details
 
 
+def _meaningful_development(event: dict, threshold: int, score: int, config: dict) -> bool:
+    metadata = event.get("metadata") or {}
+    return bool(metadata.get("development_meaningful")) and score >= threshold + int(config.get("DEVELOPMENT_OVERRIDE_DELTA", 8))
+
+
+def _rolling_frequency_details(event: dict, now: datetime, config: dict, conn, tier: str) -> dict:
+    limits = config.get("ROLLING_NOTIFICATION_LIMITS") or {}
+    details = {"active": False, "bypassed_for_safety": False, "blocked_by": [], "checks": []}
+    if conn is None:
+        return details
+    checks = []
+    global_limit = limits.get("global") or {}
+    if int(global_limit.get("count", 0)) > 0:
+        checks.append(("global", global_limit, ""))
+    topic_limits = limits.get("topic") or {}
+    topic_limit = topic_limits.get(event.get("topic")) or topic_limits.get("default") or {}
+    if int(topic_limit.get("count", 0)) > 0:
+        checks.append(("topic", topic_limit, event.get("topic", "")))
+    tier_limit = (limits.get("tier") or {}).get(tier) or {}
+    if int(tier_limit.get("count", 0)) > 0:
+        checks.append(("tier", tier_limit, tier))
+    for kind, spec, value in checks:
+        count_limit = int(spec.get("count", 0))
+        minutes = max(1, int(spec.get("minutes", 60)))
+        cutoff = (now - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        if kind == "global":
+            row = conn.execute("SELECT COUNT(*) AS count FROM events WHERE notification_count>0 AND last_notification_at>=?", (cutoff,)).fetchone()
+        elif kind == "topic":
+            row = conn.execute("SELECT COUNT(*) AS count FROM events WHERE notification_count>0 AND last_notification_at>=? AND topic=?", (cutoff, value)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM events WHERE notification_count>0 AND last_notification_at>=? AND priority=?",
+                (cutoff, "critical" if value == "urgent" else value),
+            ).fetchone()
+        count = int(row["count"] if row else 0)
+        exceeded = count >= count_limit
+        details["checks"].append({"kind": kind, "key": value or "all", "count": count, "limit": count_limit, "minutes": minutes, "exceeded": exceeded})
+        if exceeded:
+            details["blocked_by"].append(kind if not value else f"{kind}:{value}")
+    details["active"] = bool(details["blocked_by"])
+    if details["active"] and _safety_critical(event, config) and tier == "urgent":
+        details["bypassed_for_safety"] = True
+        details["active"] = False
+    return details
+
+
+def _topic_cooling_details(event: dict, now: datetime, config: dict, conn, threshold: int, score: int) -> dict:
+    cooling = config.get("TOPIC_COOLING") or {}
+    details = {"active": False, "threshold_bonus": 0, "threshold": threshold, "count": 0, "decay": 0, "overridden_for_development": False}
+    if conn is None or int(cooling.get("trigger_count", 0)) <= 0:
+        return details
+    window = max(1, int(cooling.get("window_minutes", 180)))
+    cutoff = (now - timedelta(minutes=window)).replace(microsecond=0).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) AS count,MAX(last_notification_at) AS latest FROM events WHERE notification_count>0 AND last_notification_at>=? AND topic=?",
+        (cutoff, event.get("topic")),
+    ).fetchone()
+    count = int(row["count"] if row else 0)
+    if count < int(cooling.get("trigger_count", 3)):
+        return details
+    latest = _parse_datetime(row["latest"] if row else None)
+    decay_minutes = max(1, int(cooling.get("decay_minutes", 360)))
+    decay = max(0.0, min(1.0, 1.0 - ((now - latest).total_seconds() / 60 / decay_minutes))) if latest else 1.0
+    base_bonus = min(int(cooling.get("max_threshold_bonus", 12)), (count - int(cooling.get("trigger_count", 3)) + 1) * int(cooling.get("threshold_step", 4)))
+    bonus = max(0, round(base_bonus * decay))
+    details.update({"active": bonus > 0, "threshold_bonus": bonus, "threshold": threshold + bonus, "count": count, "decay": round(decay, 2), "latest": row["latest"] if row else None})
+    if details["active"] and _meaningful_development(event, threshold, score, config):
+        details["overridden_for_development"] = True
+        details["threshold"] = threshold
+    return details
+
+
+def _trend_details(event: dict, now: datetime, config: dict, conn) -> dict:
+    details = {"bonus": 0, "credible_sources": 0, "recent_observations": 0, "meaningful_developments": 0, "local": False, "score_trajectory": 0}
+    if conn is None or not event.get("canonical_event_id"):
+        return details
+    cutoff = (now - timedelta(hours=int(config.get("TREND_WINDOW_HOURS", 72)))).replace(microsecond=0).isoformat()
+    observations = conn.execute(
+        "SELECT source_id,source_trust,observed_at FROM event_observations WHERE canonical_event_id=? AND observed_at>=?",
+        (event["canonical_event_id"], cutoff),
+    ).fetchall()
+    source_trust = {}
+    for row in observations:
+        source_trust.setdefault(row["source_id"], row["source_trust"])
+    credible_sources = {source for source, trust in source_trust.items() if TRUST_RANK.get(trust, 0) >= TRUST_RANK["reliable_secondary"]}
+    details["credible_sources"] = len(credible_sources)
+    details["recent_observations"] = len(observations)
+    development_row = conn.execute(
+        "SELECT COUNT(*) AS count FROM event_developments WHERE canonical_event_id=? AND discovered_at>=? AND meaningful=1",
+        (event["canonical_event_id"], cutoff),
+    ).fetchone()
+    details["meaningful_developments"] = int(development_row["count"] if development_row else 0)
+    metadata = event.get("metadata") or {}
+    details["local"] = bool(metadata.get("local_impact") or metadata.get("weather_label") or metadata.get("location"))
+    prior_rows = conn.execute(
+        "SELECT trace FROM event_decisions WHERE cluster_id=? AND evaluated_at>=? ORDER BY evaluated_at DESC LIMIT 20",
+        (event.get("cluster_id", ""), cutoff),
+    ).fetchall()
+    prior_scores = []
+    for row in prior_rows:
+        try:
+            prior_scores.append(int(json.loads(row["trace"] or "{}").get("effective_score", 0)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    if prior_scores and int(event.get("score", 0)) >= max(prior_scores) + 6:
+        details["score_trajectory"] = 1
+    weights = config.get("TREND_BONUS") or {}
+    if details["credible_sources"] < 2:
+        return details
+    bonus = int(weights.get("source", 4)) * min(2, details["credible_sources"] - 1)
+    bonus += int(weights.get("velocity", 2)) if details["recent_observations"] >= 3 else 0
+    bonus += int(weights.get("development", 3)) * min(2, max(0, details["meaningful_developments"] - 1))
+    bonus += int(weights.get("local", 2)) if details["local"] else 0
+    bonus += int(weights.get("trajectory", 3)) if details["score_trajectory"] else 0
+    details["bonus"] = min(20, max(0, bonus))
+    return details
+
+
+def _quiet_hours_details(event: dict, now: datetime, prefs: dict, config: dict, tier: str, score: int) -> dict:
+    active = is_quiet_hours(now, prefs["quiet_start"], prefs["quiet_end"], prefs["timezone"])
+    safety_bypass = bool(active and _safety_critical(event, config) and tier == "urgent" and score >= int(config.get("URGENT_NOTIFY_SCORE", 98)))
+    metadata = event.get("metadata") or {}
+    time_sensitive = bool(metadata.get("time_sensitive")) or bool(metadata.get("safety_critical"))
+    high_bypass = bool(active and tier == "high" and time_sensitive and score >= 95)
+    bypassed = safety_bypass or high_bypass
+    return {
+        "active": active,
+        "affected": bool(active and not bypassed),
+        "bypassed": bypassed,
+        "tier": tier,
+        "time_sensitive": time_sensitive,
+        "reason": "safety-critical bypass" if safety_bypass else "time-sensitive high-tier bypass" if high_bypass else "quiet hours" if active else "outside quiet hours",
+    }
+
+
 def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None, config: dict | None = None, conn=None) -> tuple[bool, str, dict]:
     config = config or {
         "STRICT_MIN_THRESHOLDS": STRICT_MIN_THRESHOLDS,
@@ -481,14 +616,20 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
         "TIMEZONE": prefs.get("timezone", "UTC"),
     }
     now = now or datetime.now(timezone.utc)
-    threshold = max(
+    base_threshold = max(
         int((prefs.get("topic_thresholds") or {}).get(event["topic"], 80)),
         int((config.get("STRICT_MIN_THRESHOLDS") or STRICT_MIN_THRESHOLDS).get(event.get("topic"), 80)),
     )
+    raw_score = int(event.get("score", 0))
+    trend = _trend_details(event, now, config, conn)
+    score_after_trend = min(100, raw_score + int(trend.get("bonus", 0)))
+    threshold = base_threshold
+    cooling = _topic_cooling_details(event, now, config, conn, base_threshold, score_after_trend)
+    if cooling["active"] and not cooling["overridden_for_development"]:
+        threshold = int(cooling["threshold"])
     freshness = _freshness_details(event, now, config)
     cooldown = _cooldown_details(event, now, config, conn)
     components = dict((event.get("metadata") or {}).get("score_components") or {})
-    raw_score = int(event.get("score", 0))
     # Keep source scoring stable, but make older stories gradually less likely
     # to interrupt. Unknown timestamps are left unchanged; they should be
     # observable in the trace rather than silently penalized.
@@ -496,8 +637,14 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
         effective_score = raw_score
     else:
         freshness_factor = 0.5 + (float(freshness["score"]) / 200.0)
-        effective_score = max(0, min(100, round(raw_score * freshness_factor)))
-    components["freshness_decay"] = raw_score - effective_score
+        effective_score = max(0, min(100, round(score_after_trend * freshness_factor)))
+    components["trend_escalation"] = int(trend.get("bonus", 0))
+    components["freshness_decay"] = score_after_trend - effective_score
+    components.setdefault("local_relevance", int((event.get("metadata") or {}).get("local_relevance_contribution", 0)))
+    tier_event = {**event, "score": score_after_trend}
+    tier = notification_tier(tier_event, config)
+    quiet = _quiet_hours_details(event, now, prefs, config, tier, effective_score)
+    frequency = _rolling_frequency_details(tier_event, now, config, conn, tier)
     trace = {
         "evaluated_at": now.replace(microsecond=0).isoformat(),
         "canonical_event_id": event.get("canonical_event_id", ""),
@@ -508,16 +655,24 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
         "entities": event.get("normalized_entities") or (event.get("metadata") or {}).get("entities", []),
         "location": event.get("normalized_location") or (event.get("metadata") or {}).get("location", ""),
         "score": raw_score,
+        "score_after_trend": score_after_trend,
         "effective_score": effective_score,
+        "base_threshold": base_threshold,
         "threshold": threshold,
         "score_components": components,
         "source_trust": (event.get("metadata") or {}).get("source_trust", "unknown"),
         "source_trust_contribution": components.get("source_trust", 0),
         "personalized_interest_contribution": components.get("personal_interest", 0) + components.get("learning", 0),
         "local_relevance": (event.get("metadata") or {}).get("local_impact") or (event.get("metadata") or {}).get("weather_label", ""),
+        "local_relevance_contribution": components.get("local_relevance", 0),
+        "domain_contribution": components.get("domain", 0),
         "freshness": freshness,
-        "notification_tier": notification_tier(event, config),
+        "notification_tier": tier,
         "cooldown": cooldown,
+        "rolling_frequency": frequency,
+        "topic_cooling": cooling,
+        "quiet_hours": quiet,
+        "trend": trend,
         "pushed": bool(event.get("notification_count", 0)),
         "safety_critical": _safety_critical(event, config),
     }
@@ -525,17 +680,26 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
         return False, "source initialization", trace
     if not event.get("relevant"):
         return False, "not relevant", trace
-    if effective_score < threshold:
-        return False, f"score {effective_score} below {threshold} threshold after freshness decay", trace
+    if effective_score < base_threshold:
+        return False, f"score {effective_score} below {base_threshold} threshold after freshness decay", trace
+    if cooling["active"] and not cooling["overridden_for_development"] and effective_score < threshold:
+        return False, "temporary topic cooling", trace
     if muted_until(prefs, event["topic"]):
         return False, "topic muted", trace
     if freshness["state"] == "stale":
         return False, "stale event", trace
-    bypass = max(int(prefs.get("quiet_bypass_priority", 98)), int(config.get("URGENT_NOTIFY_SCORE", 98)))
-    if event["score"] < bypass and is_quiet_hours(now, prefs["quiet_start"], prefs["quiet_end"], prefs["timezone"]):
+    if quiet["affected"]:
         return False, "quiet hours", trace
     if cooldown["active"]:
-        return False, "topic or event cooldown", trace
+        if _meaningful_development(event, base_threshold, effective_score, config):
+            cooldown["overridden_for_development"] = True
+            trace["cooldown"] = cooldown
+        else:
+            return False, "topic or event cooldown", trace
+    if frequency["active"]:
+        return False, "rolling notification ceiling", trace
+    if cooling["active"] and not cooling["overridden_for_development"]:
+        return False, "temporary topic cooling", trace
     return True, "relevant, fresh, and above strict threshold", trace
 
 

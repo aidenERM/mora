@@ -34,6 +34,20 @@ STRICT_MIN_THRESHOLDS = {
     "system": 0,
 }
 
+DEFAULT_ROLLING_NOTIFICATION_LIMITS = {
+    "global": {"count": 4, "minutes": 60},
+    "topic": {"count": 2, "minutes": 180},
+    "tier": {},
+}
+
+DEFAULT_TOPIC_COOLING = {
+    "window_minutes": 180,
+    "trigger_count": 3,
+    "threshold_step": 4,
+    "max_threshold_bonus": 12,
+    "decay_minutes": 360,
+}
+
 TOPIC_LABELS = {
     "weather": "Weather",
     "warzone": "Warzone / COD",
@@ -165,6 +179,11 @@ def load_config(test_config: dict | None = None) -> dict:
             "package": 1440,
             "system": 1440,
         }, **(_json("PULSE_NOTIFICATION_MAX_AGE_JSON", {}) or {})},
+        "ROLLING_NOTIFICATION_LIMITS": {**DEFAULT_ROLLING_NOTIFICATION_LIMITS, **(_json("PULSE_ROLLING_NOTIFICATION_LIMITS_JSON", {}) or {})},
+        "TOPIC_COOLING": {**DEFAULT_TOPIC_COOLING, **(_json("PULSE_TOPIC_COOLING_JSON", {}) or {})},
+        "DEVELOPMENT_OVERRIDE_DELTA": max(5, min(30, int(os.environ.get("PULSE_DEVELOPMENT_OVERRIDE_DELTA", "8")))),
+        "TREND_WINDOW_HOURS": max(6, min(168, int(os.environ.get("PULSE_TREND_WINDOW_HOURS", "72")))),
+        "TREND_BONUS": {"source": 4, "velocity": 2, "development": 3, "local": 2, "trajectory": 3},
         "MAX_NOTIFICATIONS_PER_RUN": max(1, min(5, int(os.environ.get("PULSE_MAX_NOTIFICATIONS_PER_RUN", "2")))),
         "URGENT_NOTIFY_SCORE": max(95, min(100, int(os.environ.get("PULSE_URGENT_NOTIFY_SCORE", "98")))),
         "MATERIAL_UPDATE_SCORE_DELTA": max(5, min(40, int(os.environ.get("PULSE_MATERIAL_UPDATE_SCORE_DELTA", "12")))),

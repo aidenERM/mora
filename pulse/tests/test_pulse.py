@@ -335,6 +335,13 @@ def test_legacy_schema_migration_backfills_model_without_requeueing(tmp_path):
         VALUES('legacy-1','feed','rss','apple','Apple security update','update','body',
             'https://apple.test/update','feed:1','2026-09-20T10:00:00+00:00',
             '2026-09-20T10:00:00+00:00',92,'high',1,'{"source_trust":"primary"}',1);
+        CREATE TABLE event_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+            canonical_event_id TEXT NOT NULL DEFAULT '', cluster_id TEXT NOT NULL DEFAULT '',
+            evaluated_at TEXT NOT NULL, allowed INTEGER NOT NULL, reason TEXT NOT NULL,
+            score INTEGER NOT NULL, threshold INTEGER NOT NULL, tier TEXT NOT NULL,
+            near_threshold INTEGER NOT NULL DEFAULT 0, trace TEXT NOT NULL DEFAULT '{}'
+        );
     """)
     conn.commit()
     conn.close()
@@ -349,6 +356,8 @@ def test_legacy_schema_migration_backfills_model_without_requeueing(tmp_path):
     assert conn.execute("select count(*) from canonical_events").fetchone()[0] == 1
     assert conn.execute("select count(*) from event_observations").fetchone()[0] == 1
     assert conn.execute("select count(*) from event_developments").fetchone()[0] == 1
+    decision_columns = {row[1] for row in conn.execute("pragma table_info(event_decisions)")}
+    assert {"distance_from_threshold", "later_became_important", "later_development_notified"}.issubset(decision_columns)
 
 
 def test_feedback_simulator_and_morning_catchup(tmp_path):
@@ -397,3 +406,90 @@ def test_domain_profiles_penalize_low_value_gaming_and_apple_noise():
     sources.annotate_candidate(apple, [])
     assert gaming["metadata"]["score_components"]["domain"] < 0
     assert apple["metadata"]["score_components"]["domain"] < 0
+
+
+def _decision_event(event_id: str, topic: str = "warzone", score: int = 92, metadata: dict | None = None) -> dict:
+    return {
+        "id": event_id, "source_id": event_id, "source_kind": "rss", "topic": topic,
+        "title": f"{topic} meaningful update {event_id}", "summary": "A meaningful update changed the situation.",
+        "body": "update", "url": f"https://example.test/{event_id}", "canonical_key": f"test:{event_id}",
+        "score": score, "priority": "critical" if score >= 90 else "high", "relevant": True,
+        "metadata": {"source_trust": "primary", **(metadata or {})},
+    }
+
+
+def test_false_negative_audit_records_distance_and_later_outcome(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    event, _ = upsert_event(conn, _decision_event("audit-1", score=83))
+    config = load_config({"DATABASE_PATH": str(database), "NOTIFICATION_COOLDOWNS": {"warzone": 0}, "ROLLING_NOTIFICATION_LIMITS": {}})
+    prefs = get_preferences(conn, config)
+    allowed, reason, trace = evaluate_notification(event, prefs, datetime.now(timezone.utc), config, conn)
+    assert not allowed
+    record_notification_decision(conn, event, allowed, reason, trace)
+    conn.commit()
+    mark_notified(conn, event["id"])
+    conn.commit()
+    reviewed = list_notification_decisions(conn, near_only=True, suppressed_only=True)
+    assert reviewed[0]["distance_from_threshold"] <= 0
+    assert reviewed[0]["later_became_important"] is True
+    assert reviewed[0]["trace"]["freshness"]
+
+
+def test_rolling_ceiling_and_safety_bypass_are_in_shared_decision_trace(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({
+        "DATABASE_PATH": str(database),
+        "NOTIFICATION_COOLDOWNS": {"warzone": 0, "earthquake": 0},
+        "ROLLING_NOTIFICATION_LIMITS": {"global": {"count": 1, "minutes": 60}, "topic": {}, "tier": {}},
+    })
+    sent, _ = upsert_event(conn, _decision_event("ceiling-sent"))
+    mark_notified(conn, sent["id"])
+    candidate, _ = upsert_event(conn, _decision_event("ceiling-next", score=94))
+    prefs = get_preferences(conn, config)
+    allowed, reason, trace = evaluate_notification(candidate, prefs, datetime.now(timezone.utc), config, conn)
+    assert not allowed and reason == "rolling notification ceiling"
+    assert trace["rolling_frequency"]["active"]
+    safety, _ = upsert_event(conn, _decision_event("ceiling-safety", "earthquake", 99, {"safety_critical": True}))
+    allowed, _, safety_trace = evaluate_notification(safety, prefs, datetime.now(timezone.utc), config, conn)
+    assert allowed
+    assert safety_trace["rolling_frequency"]["bypassed_for_safety"] is True
+
+
+def test_quiet_hours_cooling_and_trend_escalation_are_explainable(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({
+        "DATABASE_PATH": str(database), "TIMEZONE": "UTC", "QUIET_START": "00:00", "QUIET_END": "23:59",
+        "NOTIFICATION_COOLDOWNS": {"warzone": 0, "apple": 0}, "ROLLING_NOTIFICATION_LIMITS": {},
+    })
+    prefs = get_preferences(conn, config)
+    quiet, _ = upsert_event(conn, _decision_event("quiet-1", score=88))
+    allowed, reason, trace = evaluate_notification(quiet, prefs, datetime(2026, 9, 20, 12, tzinfo=timezone.utc), config, conn)
+    assert not allowed and reason == "quiet hours" and trace["quiet_hours"]["affected"]
+    cooling_titles = ("Warzone alpha outage", "Ranked cobalt disruption", "Ricochet delta incident")
+    for index, title in enumerate(cooling_titles):
+        cooling_event = _decision_event(f"cool-{index}", score=95)
+        cooling_event["title"] = title
+        cooling_event["summary"] = f"A separate event {index} requires attention."
+        sent, _ = upsert_event(conn, cooling_event)
+        mark_notified(conn, sent["id"])
+    cooled, _ = upsert_event(conn, _decision_event("cooled", score=86))
+    config["QUIET_START"], config["QUIET_END"] = "23:00", "23:01"
+    prefs = get_preferences(conn, config)
+    allowed, reason, cooling_trace = evaluate_notification(cooled, prefs, datetime(2026, 9, 20, 12, tzinfo=timezone.utc), config, conn)
+    assert not allowed and reason == "temporary topic cooling"
+    assert cooling_trace["topic_cooling"]["threshold_bonus"] > 0
+    override, _ = upsert_event(conn, _decision_event("cool-development", score=96, metadata={"development_meaningful": True}))
+    allowed, _, override_trace = evaluate_notification(override, prefs, datetime(2026, 9, 20, 12, tzinfo=timezone.utc), config, conn)
+    assert allowed and override_trace["topic_cooling"]["overridden_for_development"]
+    first, _ = upsert_event(conn, _decision_event("trend-1", "apple", 80, {"sources": [{"url": "https://one.test", "title": "one"}]}))
+    second, _ = upsert_event(conn, _decision_event("trend-2", "apple", 80, {"sources": [{"url": "https://two.test", "title": "two"}]}))
+    trend_config = {**config, "ROLLING_NOTIFICATION_LIMITS": {}, "QUIET_START": "23:00", "QUIET_END": "23:01"}
+    _, _, trend_trace = evaluate_notification(second, get_preferences(conn, trend_config), datetime.now(timezone.utc), trend_config, conn)
+    assert trend_trace["trend"]["credible_sources"] >= 2
+    assert trend_trace["trend"]["bonus"] > 0

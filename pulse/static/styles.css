@@ -117,6 +117,7 @@ output { color: var(--cyan); font-size: .8rem; text-align: right; }
 .quality-row { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; margin-top: .7rem; }
 .source-list { display: grid; gap: .5rem; margin-top: .85rem; }
 .source-row { display: flex; justify-content: space-between; gap: 1rem; padding: .55rem .65rem; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: .75rem; }
+.source-row small { display: block; margin-top: .18rem; color: var(--muted); font-size: .68rem; }
 .source-row:hover { border-color: var(--line-bright); color: var(--text); }
 .feedback-row { display: flex; flex-wrap: wrap; gap: .65rem; margin: 0 0 1.2rem; }
 .learning-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: .45rem; margin: .3rem 0 1rem; color: var(--muted); font-size: .7rem; text-align: center; }
