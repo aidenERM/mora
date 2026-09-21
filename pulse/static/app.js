@@ -247,6 +247,21 @@ function integrationsCard() {
   return `<section class="rules-card"><div class="rules-body"><div class="eyebrow">context and connections</div><h3>Pulse integrations</h3><p class="field-note">current mode: ${escapeHtml(mode)} · ${state.integrations.filter((item) => item.connection_state === "connected").length} connected</p><a class="button secondary full" href="/integrations">open integrations</a></div></section>`;
 }
 
+function integrationSetupBanner() {
+  const params = new URLSearchParams(location.search);
+  const connected = params.get("connected");
+  const oauthError = params.get("oauth_error");
+  const message = connected === "google"
+    ? "Google connected. Pulse can now sync Gmail, Calendar, and contacts."
+    : connected === "discord"
+      ? "Discord connected. Pulse can now read your account and selected server context."
+      : oauthError
+        ? "That connection did not finish. Try the button again, then approve the requested access."
+        : "Choose an account below. Pulse will open the official authorization screen, then return here.";
+  const messageClass = connected ? "integration-message success" : oauthError ? "integration-message error" : "integration-message";
+  return `<section class="integration-setup"><div><span class="eyebrow">first-time setup</span><h2>connect your accounts</h2><p>${escapeHtml(message)}</p></div><div class="integration-setup-actions"><a class="button" href="/api/integrations/google/connect">connect Google</a><a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a></div></section><p class="${messageClass}">${connected ? "connection saved securely on the server" : oauthError ? "no credentials were changed" : "you can disconnect either account later"}</p>`;
+}
+
 function renderIntegrations() {
   document.title = "Pulse · integrations";
   const item = (provider) => (state.integrations || []).find((entry) => entry.provider === provider) || { provider, label: provider, metadata: {} };
@@ -265,7 +280,7 @@ function renderIntegrations() {
     + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">discord</div>${header(discord, "Discord")}<p class="field-note">Official OAuth only: identity and selected server context, never generic chat history.</p><div class="feedback-row"><a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a><button class="button ghost-button" data-action="integration-test" data-provider="discord">test</button>${discord.has_credentials ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="discord">disconnect</button>` : ""}</div></div></section>`
     + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">aws ai</div>${header(aws, "AWS Bedrock")}<p class="field-note">region: ${escapeHtml(aws.metadata?.region || "us-east-1")} · model: ${escapeHtml(aws.metadata?.model || state.config?.bedrock_model_id || "openai.gpt-5.6-luna")} · credentials: ${aws.metadata?.credentials_present ? "present" : "missing"}</p><p class="fine-print">AI is optional. Deterministic scoring continues when Bedrock is unavailable.</p><button class="button secondary" data-action="integration-test" data-provider="aws-bedrock">test AI</button></div></section>`;
   const contextRows = (state.context || []).map((item) => `<div class="diagnostic-row"><span>${escapeHtml(item.kind)}<small>${escapeHtml(item.source)}</small></span><strong>${escapeHtml(JSON.stringify(item.value))}</strong></div>`).join("") || `<p class="fine-print">no companion context has been received</p>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect only the context Pulse can use to make a better decision. credentials stay server-side.</p>${cards}<section class="quality-card diagnostics"><span class="eyebrow">active context</span>${contextRows}</section><a class="button ghost-button full" href="/">back to history</a>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect only the context Pulse can use to make a better decision. credentials stay server-side.</p>${integrationSetupBanner()}${cards}<section class="quality-card diagnostics"><span class="eyebrow">active context</span>${contextRows}</section><a class="button ghost-button full" href="/">back to history</a>`;
 }
 
 function renderHome() {

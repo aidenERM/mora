@@ -53,6 +53,13 @@ h3 { margin: .7rem 0 .4rem; font-size: 1.02rem; line-height: 1.25; letter-spacin
 .alert-card h2 { margin: .4rem 0 .2rem; }
 .alert-card p { max-width: 28rem; margin-bottom: 0; color: var(--muted); font-size: .87rem; }
 .alert-card.enabled { border-color: rgba(119, 226, 255, .26); background: linear-gradient(145deg, rgba(20, 52, 66, .62), rgba(11, 18, 27, .96)); }
+.integration-setup { display: grid; gap: 1rem; margin: 1.4rem 0 .45rem; padding: 1.25rem; border: 1px solid var(--line-bright); border-radius: var(--radius); background: linear-gradient(145deg, rgba(20, 52, 66, .62), rgba(11, 18, 27, .96)); }
+.integration-setup h2 { margin: .4rem 0 .25rem; font-size: 1.35rem; }
+.integration-setup p { max-width: 36rem; margin: 0; color: var(--muted); font-size: .88rem; }
+.integration-setup-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
+.integration-message { margin: 0 0 1rem; color: var(--muted); font-size: .76rem; }
+.integration-message.success { color: var(--cyan); }
+.integration-message.error { color: var(--red); }
 .button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: .68rem 1rem; border: 1px solid var(--cyan); border-radius: 13px; color: #071018; background: var(--cyan); font-weight: 800; font-size: .86rem; white-space: nowrap; }
 .button:hover { filter: brightness(1.08); }
 .button.secondary, .button.ghost-button { border-color: var(--line-bright); color: var(--cyan); background: var(--cyan-soft); }
