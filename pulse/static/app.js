@@ -334,7 +334,12 @@ function renderHome() {
   const historyAction = state.events.length > importantEvents.length ? `<button class="button ghost-button full" data-action="show-history">${state.showAllHistory ? "show important only" : `show all ${state.events.length} saved events`}</button>` : "";
   const topics = ["all", ...new Set(importantEvents.map((item) => item.topic))];
   const topicFilters = topics.map((topic) => `<button class="topic-filter ${state.activeTopic === topic ? "active" : ""}" data-action="filter-topic" data-topic="${escapeHtml(topic)}">${topic === "all" ? "for you" : escapeHtml(topicLabel(topic))}</button>`).join("");
-  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">${greeting()} · aiden</span><h1>your pulse</h1><p>only the signals worth your attention.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">your signal layer</span><h2>${state.activeTopic === "all" ? "for you" : escapeHtml(topicLabel(state.activeTopic))}</h2></div><span class="muted">${state.showAllHistory ? "history" : "now"}</span></section><div class="topic-filters" aria-label="Filter signals">${topicFilters}</div><section class="event-list">${events}</section>${historyAction}<div id="settings-anchor">${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}</div><p class="footer-note">quiet by default · private by design</p>`;
+  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">${greeting()} · aiden</span><h1>your pulse</h1><p>only the signals worth your attention.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">your signal layer</span><h2>${state.activeTopic === "all" ? "for you" : escapeHtml(topicLabel(state.activeTopic))}</h2></div><span class="muted">${state.showAllHistory ? "history" : "now"}</span></section><div class="topic-filters" aria-label="Filter signals">${topicFilters}</div><section class="event-list">${events}</section>${historyAction}<p class="footer-note">quiet by default · private by design</p>`;
+}
+
+function renderSettings() {
+  document.title = "Pulse · controls";
+  app.innerHTML = `<section class="page-heading"><span class="eyebrow">controls</span><h1>your Pulse</h1><p>quiet hours, interests, sources, feedback, and security.</p></section>${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">changes apply to the next 15-minute check.</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -369,10 +374,13 @@ function render() {
   } else if (location.pathname.startsWith("/integrations")) {
     if (location.pathname.startsWith("/integrations/apple")) renderAppleSetup();
     else renderIntegrations();
+  } else if (location.pathname.startsWith("/settings")) {
+    renderSettings();
   } else {
     renderHome();
   }
-  document.querySelectorAll("[data-nav]").forEach((item) => item.classList.toggle("active", item.dataset.nav === (location.pathname.startsWith("/integrations") ? "integrations" : "home")));
+  const activeNav = location.pathname.startsWith("/integrations") ? "integrations" : location.pathname.startsWith("/settings") ? "settings" : "home";
+  document.querySelectorAll("[data-nav]").forEach((item) => item.classList.toggle("active", item.dataset.nav === activeNav));
 }
 
 async function bootstrap() {
@@ -429,7 +437,7 @@ document.addEventListener("submit", async (event) => {
       if (Number.isNaN(starts.getTime())) throw new Error("choose a valid start time");
       await api("/api/game-events", { method: "POST", body: JSON.stringify({ game: document.querySelector("#game-event-game").value, title: document.querySelector("#game-event-title").value, starts_at: starts.toISOString(), kind: "event" }) });
       showToast("countdown added");
-      await loadAuthenticatedState(); renderHome();
+      await loadAuthenticatedState(); render();
     } catch (error) { showToast(error.message, true); }
     return;
   }
@@ -456,13 +464,8 @@ document.addEventListener("click", async (event) => {
   if (!action) return;
   try {
     if (action === "open-settings") {
-      if (location.pathname.startsWith("/integrations")) {
-        history.pushState({}, "", "/");
-        await loadAuthenticatedState();
-        renderHome();
-      }
-      const target = document.querySelector("#settings-anchor .rules-card");
-      if (target) { target.open = true; target.scrollIntoView({ behavior: "smooth", block: "start" }); }
+      history.pushState({}, "", "/settings");
+      render();
       return;
     }
     if (action === "enable-alerts") await enableAlerts();
@@ -483,7 +486,7 @@ document.addEventListener("click", async (event) => {
       target.innerHTML = `<div class="quality-card"><span class="eyebrow">review-only draft</span><textarea id="reply-draft-text" rows="6">${escapeHtml(result.draft)}</textarea><div class="provider-actions"><button class="button secondary" data-action="copy-text" data-copy-target="reply-draft-text">copy draft</button></div><p class="fine-print">generated by ${escapeHtml(result.generated_by)} · Pulse never sends replies automatically</p></div>`;
       showToast("draft ready for review");
     }
-    if (action === "delete-game-event") { await api(`/api/game-events/${encodeURIComponent(event.target.closest("[data-game-event-id]")?.dataset.gameEventId)}`, { method: "DELETE", body: "{}" }); await loadAuthenticatedState(); renderHome(); showToast("countdown removed"); }
+    if (action === "delete-game-event") { await api(`/api/game-events/${encodeURIComponent(event.target.closest("[data-game-event-id]")?.dataset.gameEventId)}`, { method: "DELETE", body: "{}" }); await loadAuthenticatedState(); render(); showToast("countdown removed"); }
     if (action === "mute") { await api(`/api/topics/${encodeURIComponent(event.target.closest("[data-topic]")?.dataset.topic || state.detail.topic)}/mute`, { method: "POST", body: JSON.stringify({ days: 7 }) }); showToast("topic muted for seven days"); }
     if (action === "follow" || action === "less-like") {
       const eventId = event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id;
