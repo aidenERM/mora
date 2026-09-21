@@ -170,6 +170,38 @@ output { color: var(--cyan); font-size: .8rem; text-align: right; }
 @media (min-width: 640px) { .app-shell { width: min(100% - 48px, 760px); } .alert-card { padding: 1.4rem; } }
 @media (max-width: 480px) { .input-row { grid-template-columns: 1fr; } .alert-card { align-items: start; flex-direction: column; } .alert-card .button { width: 100%; } .detail-actions .button { flex: 1 1 calc(50% - .65rem); } }
 
+/* phone-only product surface */
+.topbar { border-bottom: 1px solid rgba(190, 205, 224, .07); }
+.main { min-height: calc(100vh - 120px); }
+.home-hero { margin-top: 1.45rem; }
+.home-hero h1 { font-weight: 760; }
+.signal-strip { scrollbar-width: none; }
+.signal-strip::-webkit-scrollbar, .topic-filters::-webkit-scrollbar { display: none; }
+.topic-filters { display: flex; gap: .45rem; overflow-x: auto; margin: -.1rem 0 1rem; padding: .15rem 0 .3rem; scrollbar-width: none; }
+.topic-filter { flex: 0 0 auto; min-height: 32px; padding: .35rem .7rem; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: rgba(255,255,255,.025); font-size: .72rem; }
+.topic-filter.active { border-color: var(--line-bright); color: #081019; background: var(--cyan); font-weight: 800; }
+.feed-head { align-items: center; }
+.feed-head h2 { font-size: 1.45rem; font-weight: 760; }
+.alert-card { border-color: rgba(168, 228, 255, .2); }
+.alert-card.enabled { background: linear-gradient(135deg, rgba(31, 65, 80, .7), rgba(12, 19, 28, .92)); }
+.alert-card .eyebrow { color: var(--cyan); }
+.event-card { border-color: rgba(190, 205, 224, .1); }
+.event-card:has(.priority-critical), .event-card:has(.priority-high) { border-color: rgba(244, 186, 112, .2); }
+.event-card h3 { font-weight: 720; }
+.event-glyph { color: #c4edff; background: linear-gradient(145deg, rgba(168,228,255,.15), rgba(168,228,255,.04)); }
+.rules-card { border-radius: 16px; background: rgba(15, 19, 27, .72); box-shadow: none; }
+.rules-card + .rules-card { margin-top: .6rem; }
+.rules-card summary { padding: 1rem; }
+.rules-body { padding: 0 1rem 1rem; }
+.section-eyebrow { margin-top: 1.15rem; }
+.provider-grid { grid-template-columns: 1fr; }
+.provider-card { background: rgba(15, 19, 27, .72); }
+.provider-card h2 { font-weight: 750; }
+.bottom-nav { padding-top: .45rem; background: rgba(7, 9, 13, .94); }
+.bottom-nav a, .bottom-nav button { letter-spacing: .01em; }
+.nav-icon { font-size: 1.05rem; line-height: 1; }
+.footer-note { margin-top: 1.5rem; }
+
 /* phone-first 0.2 surface */
 :root { --bg: #07090d; --panel-solid: #11151c; --line: rgba(190, 205, 224, .13); --line-bright: rgba(150, 220, 255, .38); --cyan: #a8e4ff; --cyan-soft: rgba(168, 228, 255, .09); --radius: 18px; }
 body { background: radial-gradient(circle at 50% -20%, #16202c 0, var(--bg) 34rem); }

@@ -1,5 +1,5 @@
-const CACHE = "pulse-shell-v9";
-const SHELL = ["/", "/static/styles.css", "/static/app.js?v=pulse-0.2-phone-3", "/manifest.webmanifest", "/icon.svg"];
+const CACHE = "pulse-shell-v10";
+const SHELL = ["/", "/static/styles.css", "/static/app.js?v=pulse-0.2-phone-4", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
