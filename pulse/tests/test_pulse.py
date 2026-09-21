@@ -262,6 +262,10 @@ def test_default_high_value_sources_are_official_and_domain_scoped():
     assert configured["discord-blog"]["url"] == "https://discord.com/blog"
     assert configured["discord-blog"]["topic"] == "discord"
     assert configured["discord-blog"]["trust"] == "primary"
+    assert configured["openai-news-rss"]["url"] == "https://openai.com/news/rss.xml"
+    assert configured["openai-news-rss"]["topic"] == "openai"
+    assert configured["discord-blog-rss"]["url"] == "https://discord.com/blog/rss.xml"
+    assert configured["discord-blog-rss"]["topic"] == "discord"
 
 
 def test_personal_discovery_profiles_keep_domains_separate():

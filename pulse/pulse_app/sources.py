@@ -49,6 +49,24 @@ DEFAULT_SOURCES = [
         "trust": "primary",
         "keywords": ["discord", "security", "outage", "announcement", "patch", "release"],
     },
+    {
+        "id": "openai-news-rss",
+        "kind": "rss",
+        "label": "OpenAI News",
+        "url": "https://openai.com/news/rss.xml",
+        "topic": "openai",
+        "trust": "primary",
+        "keywords": ["chatgpt", "openai", "release", "model", "security", "availability", "announcement"],
+    },
+    {
+        "id": "discord-blog-rss",
+        "kind": "rss",
+        "label": "Discord Blog",
+        "url": "https://discord.com/blog/rss.xml",
+        "topic": "discord",
+        "trust": "primary",
+        "keywords": ["discord", "security", "outage", "announcement", "patch", "release"],
+    },
 ]
 
 
