@@ -296,6 +296,9 @@ def test_default_high_value_sources_are_official_and_domain_scoped():
     assert configured["instagram-major-news-search"]["topic"] == "instagram"
     assert configured["unstable-smp-news-search"]["topic"] == "unstable_smp"
     assert all(configured[key]["trust"] == "reliable_secondary" for key in ("rocket-league-news-search", "instagram-major-news-search", "unstable-smp-news-search"))
+    assert configured["github-status"]["topic"] == "service_status"
+    assert configured["openai-status"]["topic"] == "service_status"
+    assert configured["discord-status"]["topic"] == "service_status"
 
 
 def test_personal_discovery_profiles_keep_domains_separate():
@@ -318,6 +321,12 @@ def test_ios_only_allows_confirmed_leaks():
     rumor, _ = domain_adjustment({"topic": "ios", "title": "iOS leak", "summary": "An unconfirmed rumor."})
     confirmed, _ = domain_adjustment({"topic": "ios", "title": "Confirmed iOS leak", "summary": "Apple confirmed the feature."})
     assert rumor < 0 and confirmed > 0
+
+
+def test_service_status_only_rewards_active_incidents():
+    healthy, _ = domain_adjustment({"topic": "service_status", "title": "All systems operational", "summary": "All impacted services fully recovered."})
+    incident, _ = domain_adjustment({"topic": "service_status", "title": "Elevated errors affecting ChatGPT", "summary": "OpenAI is investigating an incident."})
+    assert healthy < 0 and incident > 0
 
 
 def test_notification_route_is_exact_event_route():

@@ -19,6 +19,7 @@ DEFAULT_THRESHOLDS = {
     "package": 86,
     "purchase": 84,
     "security": 90,
+    "service_status": 92,
     "school": 86,
     "travel": 86,
     "discord": 84,
@@ -30,7 +31,7 @@ DEFAULT_THRESHOLDS = {
     "system": 0,
 }
 
-PERSONAL_PRIORITY_CATEGORIES = {"apple", "ios", "openai", "warzone", "gaming", "rocket_league", "unstable_smp", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "travel", "discord", "instagram", "important_services", "important_people", "music_media"}
+PERSONAL_PRIORITY_CATEGORIES = {"apple", "ios", "openai", "warzone", "gaming", "rocket_league", "unstable_smp", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "service_status", "travel", "discord", "instagram", "important_services", "important_people", "music_media"}
 
 # Deliberately small, human-readable relationships. These are used as weak
 # signals for scoring and discovery, never as a replacement for exact event
@@ -46,6 +47,7 @@ TOPIC_RELATIONSHIPS = {
     "package": {"purchase", "delivery", "merchant"},
     "purchase": {"package", "merchant", "receipt"},
     "security": {"important_services", "account"},
+    "service_status": {"security", "important_services", "discord", "openai", "github", "warzone"},
     "discord": {"gaming", "coding", "community"},
     "instagram": {"social", "creator", "important_people"},
 }
@@ -63,6 +65,7 @@ STRICT_MIN_THRESHOLDS = {
     "package": 86,
     "purchase": 84,
     "security": 90,
+    "service_status": 92,
     "school": 86,
     "travel": 86,
     "discord": 84,
@@ -99,6 +102,7 @@ TOPIC_LABELS = {
     "package": "Packages",
     "purchase": "Purchases",
     "security": "Security",
+    "service_status": "Service outages",
     "school": "School",
     "travel": "Travel",
     "discord": "Discord",
@@ -271,6 +275,7 @@ def load_config(test_config: dict | None = None) -> dict:
             "package": 360,
             "purchase": 360,
             "security": 180,
+            "service_status": 240,
             "school": 240,
             "travel": 180,
             "discord": 240,
@@ -292,6 +297,7 @@ def load_config(test_config: dict | None = None) -> dict:
             "package": 1440,
             "purchase": 1440,
             "security": 720,
+            "service_status": 360,
             "school": 1440,
             "travel": 1440,
             "discord": 720,

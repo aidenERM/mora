@@ -107,6 +107,7 @@ def notification_copy(event: dict) -> tuple[str, str]:
             "watcher": "It changed a source you asked Pulse to watch.",
             "package": "It is a meaningful delivery-status change.",
             "system": "It was created directly in Pulse.",
+            "service_status": "It may affect a service Aiden uses.",
         }.get(topic, "Pulse judged it worth checking.")
     if normalize(why.rstrip(".")) not in normalize(body):
         body = clean_text(body.rstrip(". ") + ". " + why, 220)
@@ -168,6 +169,13 @@ def domain_adjustment(candidate: dict) -> tuple[int, str]:
             return -18, "openai low-value editorial signal"
         if any(term in text for term in useful):
             return 8, "openai product or safety signal"
+    if topic == "service_status":
+        useful = ("incident", "outage", "degraded", "elevated error", "unavailable", "downtime", "latency", "failed", "failing", "investigating")
+        low_value = ("all systems operational", "operational", "resolved", "fully recovered", "maintenance complete")
+        if any(term in text for term in useful):
+            return 10, "service impact signal"
+        if any(term in text for term in low_value):
+            return -24, "service status is healthy or resolved"
     if topic == "ios" and "unconfirmed" in text:
         return -14, "unconfirmed iOS signal"
     if topic == "ios" and "leak" in text and "confirmed" in text:

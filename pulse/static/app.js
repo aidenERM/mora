@@ -182,7 +182,7 @@ function eventCard(event) {
 function rulesCard() {
   const prefs = state.preferences || { quiet_start: "23:00", quiet_end: "07:00", topic_thresholds: {} };
   const thresholdRows = Object.entries(prefs.topic_thresholds || {}).filter(([topic]) => topic !== "system").map(([topic, value]) => `<label class="threshold-row"><span>${escapeHtml(topicLabel(topic))}</span><input data-threshold-topic="${escapeHtml(topic)}" type="range" min="0" max="100" step="1" value="${Number(value)}"><output>${Number(value)}</output></label>`).join("");
-  const priorityTopics = ["apple", "ios", "openai", "warzone", "rocket_league", "unstable_smp", "github", "package", "purchase", "weather", "school", "security", "travel", "discord", "instagram"];
+  const priorityTopics = ["apple", "ios", "openai", "warzone", "rocket_league", "unstable_smp", "github", "package", "purchase", "weather", "school", "security", "service_status", "travel", "discord", "instagram"];
   const priorityRows = priorityTopics.map((topic) => `<label class="threshold-row"><span>${escapeHtml(topicLabel(topic))}</span><input data-priority-topic="${topic}" type="range" min="-20" max="20" step="1" value="${Number(prefs.personal_priorities?.[topic] || 0)}"><output>${Number(prefs.personal_priorities?.[topic] || 0)}</output></label>`).join("");
   const temp = prefs.temporary_priority || {};
   const activeTemp = Object.entries(temp).find(([, value]) => value?.expires_at && new Date(value.expires_at) > new Date());
