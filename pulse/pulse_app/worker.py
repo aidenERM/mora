@@ -6,13 +6,60 @@ from datetime import datetime, timezone
 
 from .config import load_config
 from .discovery import collect_discovery_candidates
-from .integrations import mark_failure, sync_provider
+from .integrations import PROVIDERS, mark_failure, sync_provider
 from .push import send_payload
 from .rules import apply_preference_adjustments, evaluate_notification, notification_copy
 from .sources import collect_candidates
-from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, prune_history, record_event_action, record_notification_decision, runtime_config, upsert_event
+from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, get_source_state, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, prune_history, record_event_action, record_notification_decision, runtime_config, save_source_state, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
+
+
+def _integration_failure_candidate(config: dict, provider: str, error: str) -> dict:
+    label = PROVIDERS.get(provider, provider)
+    error_code = str(error or "sync_failed")[:80]
+    event_key = f"integration-error:{provider}:{error_code}"
+    return {
+        "id": "integration-error-" + provider,
+        "source_id": "integration:" + provider,
+        "source_kind": "integration",
+        "topic": "security",
+        "title": f"{label} connection needs attention",
+        "summary": f"Pulse could not sync {label}.",
+        "body": "The connection failed during the scheduled sync. Reconnect it from Pulse links.",
+        "url": config.get("APP_URL", "https://pulse.moralife.uk") + "/integrations",
+        "canonical_key": event_key,
+        "published_at": None,
+        "score": 94,
+        "priority": "high",
+        "relevant": True,
+        "suppress_notification": False,
+        "metadata": {
+            "source_trust": "primary",
+            "verification": "provider_sync",
+            "integration_failure": True,
+            "integration_provider": provider,
+            "integration_error_code": error_code,
+            "sources": [{"url": config.get("APP_URL", "https://pulse.moralife.uk") + "/integrations", "title": label, "trust": "primary"}],
+        },
+    }
+
+
+def _integration_failure_transition(conn, config: dict, provider: str, error: str) -> dict | None:
+    error_code = str(error or "sync_failed")[:80]
+    state_key = "integration-failure:" + provider
+    state = get_source_state(conn, state_key)
+    if state.get("active") and state.get("error_code") == error_code:
+        return None
+    save_source_state(conn, state_key, {"active": True, "error_code": error_code})
+    return _integration_failure_candidate(config, provider, error)
+
+
+def _clear_integration_failure(conn, provider: str) -> None:
+    state_key = "integration-failure:" + provider
+    state = get_source_state(conn, state_key)
+    if state.get("active"):
+        save_source_state(conn, state_key, {"active": False, "last_error_code": state.get("error_code", "")})
 
 
 def _payload(config: dict, event: dict, reminder: bool = False) -> dict:
@@ -52,17 +99,23 @@ def run_once(config: dict | None = None) -> dict:
     errors = []
     try:
         runtime = runtime_config(conn, config)
+        integration_candidates = []
         for provider in ("google", "discord", "apple-calendar", "apple-contacts", "apple-mail"):
             credential_provider = "icloud" if provider.startswith("apple-") else provider
             if conn.execute("SELECT 1 FROM integration_credentials WHERE provider=?", (credential_provider,)).fetchone():
                 try:
                     sync_provider(conn, config, provider)
+                    _clear_integration_failure(conn, provider)
                 except Exception as exc:
-                    mark_failure(conn, provider, type(exc).__name__)
-                    errors.append(provider + ":" + type(exc).__name__)
+                    error_code = type(exc).__name__
+                    mark_failure(conn, provider, error_code)
+                    failure = _integration_failure_transition(conn, config, provider, error_code)
+                    if failure:
+                        integration_candidates.append(failure)
+                    errors.append(provider + ":" + error_code)
                     conn.commit()
         direct_candidates = collect_candidates(conn, runtime)
-        candidates = [*direct_candidates, *game_event_candidates(conn)]
+        candidates = [*integration_candidates, *direct_candidates, *game_event_candidates(conn)]
         try:
             candidates.extend(collect_discovery_candidates(conn, runtime, direct_candidates))
         except Exception as exc:

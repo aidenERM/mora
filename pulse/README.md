@@ -41,6 +41,8 @@ For repositories you control, set `PULSE_GITHUB_WEBHOOK_SECRET` and configure Gi
 
 The authenticated debug view and `/api/audit` retain the decision trace for both pushed and suppressed events. `/api/people` exposes the minimal synchronized contact list for marking importance, `/api/packages` and `/api/purchases` expose lifecycle state, and `/api/purchases/<id>/watch` sets a small purchase watch priority. These endpoints remain private and do not expose provider credentials or full message bodies.
 
+If a connected provider fails during its scheduled sync, Pulse records one deduplicated security event and can notify through the same relevance/cooldown pipeline. Repeated identical failures stay quiet while the worker continues checking other sources; the failure code is stored as a safe type name rather than raw provider content.
+
 ## production deployment
 
 The VPS pattern matches `family-chores`: one private gunicorn listener, one worker service, nginx in front, and SQLite in `/var/lib/pulse`.

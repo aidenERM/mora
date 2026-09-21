@@ -14,6 +14,7 @@ from pulse_app.app import create_app
 from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import apply_preference_adjustments, domain_adjustment, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
+from pulse_app.worker import _integration_failure_candidate, _integration_failure_transition
 from pulse_app.sources import parse_feed
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
 from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
@@ -48,6 +49,24 @@ def test_auth_and_health(tmp_path):
     assert client.get("/api/events").status_code == 401
     login(client)
     assert client.get("/api/events").json["events"] == []
+
+
+def test_integration_failure_is_deduplicated_and_uses_safe_copy(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({"DATABASE_PATH": str(database), "APP_URL": "https://pulse.example.test"})
+    first = _integration_failure_transition(conn, config, "google", "RefreshError")
+    second = _integration_failure_transition(conn, config, "google", "RefreshError")
+    assert first and second is None
+    assert first["metadata"]["integration_error_code"] == "RefreshError"
+    title, body = notification_copy(first)
+    assert title == "Google account connection needs attention"
+    assert "Reconnect it from Pulse links" in body
+    assert "RefreshError" not in body
+    _integration_failure_transition(conn, config, "google", "TimeoutError")
+    _integration_failure_transition(conn, config, "google", "TimeoutError")
+    assert conn.execute("SELECT value FROM source_state WHERE source_id='integration-failure:google'").fetchone()
 
 
 def test_database_initialization_is_idempotent(tmp_path):

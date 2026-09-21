@@ -89,6 +89,9 @@ def notification_copy(event: dict) -> tuple[str, str]:
     body = clean_event_summary(event)
     metadata = event.get("metadata") or {}
     topic = event.get("topic")
+    if metadata.get("integration_failure"):
+        provider = metadata.get("integration_provider") or "an integration"
+        return f"{title[:120]}", clean_text(f"Pulse could not sync {provider}. Reconnect it from Pulse links.", 220)
     if topic == "weather":
         label = metadata.get("weather_label") or "your area"
         impact = metadata.get("plan_impact") or f"It may affect plans around {label}."
