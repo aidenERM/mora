@@ -267,9 +267,13 @@ def _safe_json(value, fallback=None):
 
 def connect(path: str | Path) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=20)
+    # Web and worker services can initialize the same SQLite file during a
+    # restart. Give schema/data startup enough time to wait for the other
+    # process instead of failing the web service with a transient 502.
+    conn = sqlite3.connect(path, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=60000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
