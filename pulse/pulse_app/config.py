@@ -28,10 +28,12 @@ DEFAULT_THRESHOLDS = {
     "instagram": 90,
     "rocket_league": 86,
     "unstable_smp": 86,
+    "minecraft": 88,
+    "roblox": 88,
     "system": 0,
 }
 
-PERSONAL_PRIORITY_CATEGORIES = {"apple", "ios", "openai", "warzone", "gaming", "rocket_league", "unstable_smp", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "service_status", "travel", "discord", "instagram", "important_services", "important_people", "music_media"}
+PERSONAL_PRIORITY_CATEGORIES = {"apple", "ios", "openai", "warzone", "gaming", "rocket_league", "unstable_smp", "minecraft", "roblox", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "service_status", "travel", "discord", "instagram", "important_services", "important_people", "music_media"}
 
 # Deliberately small, human-readable relationships. These are used as weak
 # signals for scoring and discovery, never as a replacement for exact event
@@ -43,6 +45,8 @@ TOPIC_RELATIONSHIPS = {
     "warzone": {"gaming", "cod", "weapon_balance", "season", "maintenance"},
     "rocket_league": {"gaming", "esports", "season"},
     "unstable_smp": {"gaming", "minecraft", "creator"},
+    "minecraft": {"gaming", "modding", "unstable_smp"},
+    "roblox": {"gaming", "creator", "platform"},
     "github": {"coding", "development", "ultimate_macro", "pulse", "release"},
     "package": {"purchase", "delivery", "merchant"},
     "purchase": {"package", "merchant", "receipt"},
@@ -74,6 +78,8 @@ STRICT_MIN_THRESHOLDS = {
     "instagram": 90,
     "rocket_league": 86,
     "unstable_smp": 86,
+    "minecraft": 88,
+    "roblox": 88,
     "system": 0,
 }
 
@@ -111,6 +117,8 @@ TOPIC_LABELS = {
     "instagram": "Instagram",
     "rocket_league": "Rocket League",
     "unstable_smp": "Unstable SMP / Universe",
+    "minecraft": "Minecraft",
+    "roblox": "Roblox",
     "system": "Pulse",
 }
 
@@ -188,6 +196,22 @@ DEFAULT_SEARCH_PROFILES = [
         "active": True,
     },
     {
+        "id": "minecraft-discovery",
+        "label": "Major Minecraft updates",
+        "topic": "minecraft",
+        "queries": ["Minecraft major update official Mojang", "Minecraft Live official announcement"],
+        "keywords": ["minecraft", "mojang", "update", "release", "snapshot", "official", "minecraft live"],
+        "active": True,
+    },
+    {
+        "id": "roblox-discovery",
+        "label": "Major Roblox updates",
+        "topic": "roblox",
+        "queries": ["Roblox major platform update official", "Roblox safety security official announcement"],
+        "keywords": ["roblox", "platform", "safety", "security", "update", "official", "announcement"],
+        "active": True,
+    },
+    {
         "id": "colombia-discovery",
         "label": "Colombia and Medellín",
         "topic": "colombia",
@@ -210,6 +234,8 @@ DEFAULT_TRACKED_ENTITIES = [
     {"id": "instagram", "name": "Instagram", "aliases": ["Instagram"], "topic": "instagram", "boost": 10},
     {"id": "discord", "name": "Discord", "aliases": ["Discord"], "topic": "discord", "boost": 12},
     {"id": "ios", "name": "iOS", "aliases": ["iOS", "iPadOS", "iOS beta"], "topic": "ios", "boost": 16},
+    {"id": "minecraft", "name": "Minecraft", "aliases": ["Minecraft", "Mojang", "Minecraft Live"], "topic": "minecraft", "boost": 14},
+    {"id": "roblox", "name": "Roblox", "aliases": ["Roblox", "Roblox Corporation"], "topic": "roblox", "boost": 12},
     {"id": "ultimate-macro", "name": "Ultimate Macro", "aliases": ["Ultimate Macro"], "topic": "github", "boost": 18},
     {"id": "aidenerm-mora", "name": "aidenERM/mora", "aliases": ["aidenERM/mora"], "topic": "github", "boost": 18},
 ]
@@ -284,6 +310,8 @@ def load_config(test_config: dict | None = None) -> dict:
             "instagram": 360,
             "rocket_league": 180,
             "unstable_smp": 240,
+            "minecraft": 240,
+            "roblox": 240,
             "system": 0,
         }, **(_json("PULSE_NOTIFICATION_COOLDOWNS_JSON", {}) or {})},
         "NOTIFICATION_MAX_AGE": {**{
@@ -306,6 +334,8 @@ def load_config(test_config: dict | None = None) -> dict:
             "instagram": 1440,
             "rocket_league": 1440,
             "unstable_smp": 1440,
+            "minecraft": 1440,
+            "roblox": 1440,
             "system": 1440,
         }, **(_json("PULSE_NOTIFICATION_MAX_AGE_JSON", {}) or {})},
         "ROLLING_NOTIFICATION_LIMITS": {**DEFAULT_ROLLING_NOTIFICATION_LIMITS, **(_json("PULSE_ROLLING_NOTIFICATION_LIMITS_JSON", {}) or {})},

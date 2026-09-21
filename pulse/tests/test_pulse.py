@@ -311,6 +311,15 @@ def test_personal_discovery_profiles_keep_domains_separate():
     assert all("unstable" not in " ".join(profiles[key]["queries"]).casefold() for key in ("rocket-league-discovery",))
 
 
+def test_personal_gaming_profiles_are_strict_and_domain_aware():
+    profiles = {item["id"]: item for item in load_config({})["SEARCH_PROFILES"]}
+    assert profiles["minecraft-discovery"]["topic"] == "minecraft"
+    assert profiles["roblox-discovery"]["topic"] == "roblox"
+    low_minecraft, _ = domain_adjustment({"topic": "minecraft", "title": "Minecraft marketplace skin", "summary": "new cosmetic item"})
+    useful_roblox, _ = domain_adjustment({"topic": "roblox", "title": "Roblox security update", "summary": "official safety changes"})
+    assert low_minecraft < 0 and useful_roblox > 0
+
+
 def test_openai_profile_rejects_editorial_case_studies_but_keeps_product_changes():
     low, _ = domain_adjustment({"topic": "openai", "title": "How a researcher uses ChatGPT", "summary": "A case study about adoption."})
     high, _ = domain_adjustment({"topic": "openai", "title": "Introducing ChatGPT Images", "summary": "A new model release and availability update."})

@@ -108,6 +108,8 @@ def notification_copy(event: dict) -> tuple[str, str]:
             "package": "It is a meaningful delivery-status change.",
             "system": "It was created directly in Pulse.",
             "service_status": "It may affect a service Aiden uses.",
+            "minecraft": "It is a potentially meaningful Minecraft update.",
+            "roblox": "It is a potentially meaningful Roblox platform or safety update.",
         }.get(topic, "Pulse judged it worth checking.")
     if normalize(why.rstrip(".")) not in normalize(body):
         body = clean_text(body.rstrip(". ") + ". " + why, 220)
@@ -162,6 +164,20 @@ def domain_adjustment(candidate: dict) -> tuple[int, str]:
             return 8, "gaming impact signal"
         if any(term in text for term in low_value):
             return -14, "gaming low-value signal"
+    if topic == "minecraft":
+        useful = ("major update", "minecraft live", "release", "snapshot", "security", "official", "java", "bedrock")
+        low_value = ("marketplace", "skin", "server list", "mod showcase", "build idea", "rumor")
+        if any(term in text for term in useful):
+            return 6, "minecraft update signal"
+        if any(term in text for term in low_value):
+            return -14, "minecraft low-value signal"
+    if topic == "roblox":
+        useful = ("platform update", "security", "safety", "outage", "release", "official", "policy", "moderation")
+        low_value = ("promo code", "free robux", "gamepass", "avatar item", "rumor")
+        if any(term in text for term in useful):
+            return 6, "roblox platform or safety signal"
+        if any(term in text for term in low_value):
+            return -14, "roblox low-value signal"
     if topic == "openai":
         useful = ("introducing chatgpt", "introducing gpt", "new model", "security", "outage", "availability", "pricing", "service", "api", "codex")
         low_value = ("how ", "case study", "research", "workers", "journalism", "funding", "joins", "supporting", "financial services", "built ", "accelerating", "older adults")
@@ -180,7 +196,7 @@ def domain_adjustment(candidate: dict) -> tuple[int, str]:
         return -14, "unconfirmed iOS signal"
     if topic == "ios" and "leak" in text and "confirmed" in text:
         return 8, "confirmed pre-release iOS signal"
-    if topic in {"ios", "instagram", "rocket_league", "unstable_smp"}:
+    if topic in {"ios", "instagram", "rocket_league", "unstable_smp", "minecraft", "roblox"}:
         useful = ("release", "released", "official", "security", "outage", "beta", "season", "update", "announcement", "confirmed")
         low_value = ("rumor", "concept", "leak", "speculation", "cosmetic", "bundle")
         if any(term in text for term in useful):
