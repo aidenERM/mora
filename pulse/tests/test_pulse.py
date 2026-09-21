@@ -301,6 +301,7 @@ def test_canonical_model_merges_observations_and_persists_suppressed_trace(tmp_p
     assert created and not duplicate
     assert first["canonical_event_id"] == second["canonical_event_id"]
     assert second["cluster_id"]
+    assert conn.execute("select count(*) from story_clusters where id=?", (second["cluster_id"],)).fetchone()[0] == 1
     assert conn.execute("select count(*) from event_observations where canonical_event_id=?", (second["canonical_event_id"],)).fetchone()[0] == 2
     prefs = get_preferences(conn, load_config({"DATABASE_PATH": str(database)}))
     allowed, reason, trace = evaluate_notification(second, prefs, datetime.now(timezone.utc), load_config({"DATABASE_PATH": str(database)}), conn)

@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS canonical_events (
     active INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_canonical_cluster ON canonical_events(cluster_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS story_clusters (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    normalized_entities TEXT NOT NULL DEFAULT '[]',
+    normalized_location TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_story_clusters_recent ON story_clusters(updated_at DESC);
 CREATE TABLE IF NOT EXISTS event_observations (
     id TEXT PRIMARY KEY,
     canonical_event_id TEXT NOT NULL,
@@ -190,6 +201,10 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
                 (fingerprint, fingerprint if notified else "", notified, item.get("notified_at"), item["id"]),
             )
             _ensure_canonical_model(conn, {**item, "content_hash": fingerprint})
+        # Populate the standalone cluster registry for databases upgraded from
+        # the first canonical-model migration as well as new databases.
+        for row in conn.execute("SELECT * FROM events WHERE canonical_event_id!='' AND cluster_id!=''").fetchall():
+            _ensure_canonical_model(conn, event_from_row(row))
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('preferences',?)", (json.dumps({}),))
         if initial_password_hash:
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash',?)", (initial_password_hash,))
@@ -487,6 +502,14 @@ def _ensure_canonical_model(conn: sqlite3.Connection, event: dict) -> dict:
         "observation_ids": observation_ids[-50:],
         "sources": metadata.get("sources") or [{"url": event.get("url", ""), "title": event.get("title", ""), "trust": metadata.get("source_trust", "")}],
     })
+    conn.execute(
+        """INSERT INTO story_clusters(id,topic,normalized_title,normalized_entities,normalized_location,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET topic=excluded.topic,normalized_title=excluded.normalized_title,
+             normalized_entities=excluded.normalized_entities,normalized_location=excluded.normalized_location,
+             updated_at=excluded.updated_at""",
+        (cluster, event.get("topic", "watcher"), normalized_title, json.dumps(entities, separators=(",", ":")), location, now, now),
+    )
     conn.execute(
         """INSERT INTO canonical_events(id,topic,normalized_title,normalized_entities,normalized_location,cluster_id,current_event_id,created_at,updated_at)
            VALUES(?,?,?,?,?,?,?,?,?)
