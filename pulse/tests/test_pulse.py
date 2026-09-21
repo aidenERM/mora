@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash
@@ -10,9 +12,9 @@ from werkzeug.security import generate_password_hash
 from pulse_app.app import create_app
 from pulse_app import discovery, sources
 from pulse_app.config import load_config
-from pulse_app.rules import is_quiet_hours, notification_copy, should_notify, score_item
+from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.storage import connect, get_preferences, init_db, mark_notified, pending_events, upsert_event
+from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, upsert_event
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -256,3 +258,141 @@ def test_strict_notification_lifecycle_keeps_history_without_repeat_push(tmp_pat
     assert "meaningful Warzone update" in body
     prefs = get_preferences(conn, config)
     assert should_notify(stored, prefs, config=config, conn=conn)[0] is False
+
+
+def test_freshness_decay_lowers_old_but_not_stale_events(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    config = load_config({
+        "DATABASE_PATH": str(database),
+        "TIMEZONE": "UTC",
+        "NOTIFICATION_MAX_AGE": {"warzone": 1440},
+        "STRICT_MIN_THRESHOLDS": {"warzone": 84},
+    })
+    init_db(database)
+    conn = connect(database)
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    event, _ = upsert_event(conn, {
+        "id": "freshness-1", "source_id": "official", "source_kind": "rss", "topic": "warzone",
+        "title": "Warzone balance patch changes REV", "summary": "REV recoil changed in the patch.",
+        "body": "patch", "url": "https://example.test/patch", "canonical_key": "freshness:1",
+        "published_at": "2026-09-20T00:00:00+00:00", "score": 92, "priority": "high", "relevant": True,
+        "metadata": {"source_trust": "primary"},
+    })
+    prefs = get_preferences(conn, config)
+    allowed, reason, trace = evaluate_notification(event, prefs, now, config, conn)
+    assert not allowed
+    assert "freshness decay" in reason
+    assert trace["effective_score"] < trace["score"]
+    assert trace["freshness"]["state"] == "fresh"
+
+
+def test_canonical_model_merges_observations_and_persists_suppressed_trace(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    base = {
+        "id": "canonical-1", "source_id": "official", "source_kind": "rss", "topic": "apple",
+        "title": "Apple security update affects iPhone", "summary": "A security update is available for iPhone users.",
+        "body": "security", "url": "https://apple.com/news", "canonical_key": "official:1", "score": 92,
+        "priority": "critical", "relevant": True, "metadata": {"source_trust": "primary", "sources": [{"url": "https://apple.com/news", "title": "official", "trust": "primary"}]},
+    }
+    first, created = upsert_event(conn, base)
+    second, duplicate = upsert_event(conn, {**base, "id": "secondary-1", "source_id": "secondary", "canonical_key": "secondary:1", "url": "https://reuters.com/news", "title": "iPhone security update from Apple", "metadata": {"source_trust": "reliable_secondary", "sources": [{"url": "https://reuters.com/news", "title": "secondary", "trust": "reliable_secondary"}]}})
+    assert created and not duplicate
+    assert first["canonical_event_id"] == second["canonical_event_id"]
+    assert second["cluster_id"]
+    assert conn.execute("select count(*) from event_observations where canonical_event_id=?", (second["canonical_event_id"],)).fetchone()[0] == 2
+    prefs = get_preferences(conn, load_config({"DATABASE_PATH": str(database)}))
+    allowed, reason, trace = evaluate_notification(second, prefs, datetime.now(timezone.utc), load_config({"DATABASE_PATH": str(database)}), conn)
+    record_notification_decision(conn, second, False, "stale event", trace)
+    conn.commit()
+    stored = get_event(conn, second["id"])
+    assert stored["decision_trace"]["cluster_id"] == second["cluster_id"]
+    assert stored["notification_reason"] == "stale event"
+    assert list_notification_decisions(conn, near_only=True)
+
+
+def test_legacy_schema_migration_backfills_model_without_requeueing(tmp_path):
+    database = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(database)
+    conn.executescript("""
+        CREATE TABLE events (
+            id TEXT PRIMARY KEY, source_id TEXT NOT NULL, source_kind TEXT NOT NULL,
+            topic TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '', url TEXT NOT NULL, canonical_key TEXT UNIQUE NOT NULL,
+            published_at TEXT, discovered_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+            score INTEGER NOT NULL, priority TEXT NOT NULL, relevant INTEGER NOT NULL DEFAULT 0,
+            suppress_notification INTEGER NOT NULL DEFAULT 0, notified_at TEXT, reminded_at TEXT,
+            remind_at TEXT, clicked_at TEXT, created_from TEXT NOT NULL DEFAULT 'source',
+            metadata TEXT NOT NULL DEFAULT '{}', content_hash TEXT NOT NULL DEFAULT '',
+            notified_hash TEXT NOT NULL DEFAULT '', notification_pending INTEGER NOT NULL DEFAULT 0,
+            notification_count INTEGER NOT NULL DEFAULT 0, last_notification_at TEXT,
+            notification_reason TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO events(id,source_id,source_kind,topic,title,summary,body,url,canonical_key,
+            discovered_at,last_seen_at,score,priority,relevant,metadata,notification_pending)
+        VALUES('legacy-1','feed','rss','apple','Apple security update','update','body',
+            'https://apple.test/update','feed:1','2026-09-20T10:00:00+00:00',
+            '2026-09-20T10:00:00+00:00',92,'high',1,'{"source_trust":"primary"}',1);
+    """)
+    conn.commit()
+    conn.close()
+
+    init_db(database)
+    conn = connect(database)
+    migrated = get_event(conn, "legacy-1")
+    assert migrated["canonical_event_id"]
+    assert migrated["cluster_id"]
+    assert migrated["decision_trace"] == {}
+    assert migrated["notification_pending"] is False
+    assert conn.execute("select count(*) from canonical_events").fetchone()[0] == 1
+    assert conn.execute("select count(*) from event_observations").fetchone()[0] == 1
+    assert conn.execute("select count(*) from event_developments").fetchone()[0] == 1
+
+
+def test_feedback_simulator_and_morning_catchup(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    client = make_client(tmp_path)
+    login(client)
+    simulation = client.post("/api/debug/simulate", json={"topic": "warzone", "title": "REV balance patch", "summary": "REV recoil changed."})
+    assert simulation.status_code == 200
+    assert simulation.json["push_sent"] is False
+    assert "score_components" in simulation.json["trace"]
+    conn = connect(database)
+    event = {
+        "id": "feedback-one", "source_id": "test", "source_kind": "rss", "topic": "warzone", "title": "REV patch",
+        "summary": "A patch changed REV recoil.", "body": "test", "url": "https://example.test", "canonical_key": "feedback:1",
+        "score": 90, "priority": "critical", "relevant": True, "metadata": {"entities": ["rev"], "entity_names": ["REV"]},
+    }
+    upsert_event(conn, event)
+    conn.commit()
+    for action in ("useful", "not_useful", "too_late"):
+        assert client.post("/api/events/feedback-one/feedback", json={"action": action}).status_code == 200
+    assert client.get("/api/learning").json["summary"]["useful"] == 1
+    now = datetime.now(timezone.utc).replace(hour=7, minute=30, second=0, microsecond=0)
+    for index in range(2):
+        upsert_event(conn, {**event, "id": f"catchup-{index}", "canonical_key": f"catchup:{index}", "title": f"Important signal {index}", "topic": "apple", "score": 90, "priority": "critical"})
+    digest, held = create_morning_catchup(conn, {**load_config({"DATABASE_PATH": str(database), "TIMEZONE": "UTC", "QUIET_END": "07:00"}), "MORNING_CATCHUP_WINDOW_MINUTES": 60}, now)
+    assert digest and len(held) >= 2
+
+
+def test_package_watcher_only_surfaces_meaningful_status_changes(tmp_path, monkeypatch):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    source = {"id": "package-test", "label": "my order", "package_id": "ABC123", "url": "https://carrier.test/ABC123", "trust": "primary"}
+    html = b"<html><head><title>Package delayed</title><meta name='description' content='Delayed by weather'></head><body>Delayed by weather</body></html>"
+    monkeypatch.setattr(sources, "_request", lambda url, headers=None: html)
+    config = load_config({"DATABASE_PATH": str(database)})
+    candidates = sources._package_candidates(conn, source)
+    assert candidates[0]["metadata"]["package_status"] == "exception"
+    assert candidates[0]["score"] >= 90
+
+
+def test_domain_profiles_penalize_low_value_gaming_and_apple_noise():
+    gaming = sources._source_item({"id": "gaming", "kind": "rss", "label": "COD", "topic": "warzone", "trust": "primary", "keywords": ["warzone"]}, {"title": "Warzone store bundle", "summary": "New skin bundle", "url": "https://example.test"})
+    apple = sources._source_item({"id": "apple", "kind": "rss", "label": "Apple", "topic": "apple", "trust": "primary", "keywords": ["iphone"]}, {"title": "iPhone case accessory deal", "summary": "New case deal", "url": "https://example.test"})
+    sources.annotate_candidate(gaming, [])
+    sources.annotate_candidate(apple, [])
+    assert gaming["metadata"]["score_components"]["domain"] < 0
+    assert apple["metadata"]["score_components"]["domain"] < 0

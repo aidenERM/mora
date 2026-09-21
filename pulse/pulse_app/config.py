@@ -16,6 +16,7 @@ DEFAULT_THRESHOLDS = {
     "colombia": 90,
     "watcher": 88,
     "earthquake": 92,
+    "package": 86,
     "system": 0,
 }
 
@@ -29,6 +30,7 @@ STRICT_MIN_THRESHOLDS = {
     "colombia": 90,
     "watcher": 88,
     "earthquake": 92,
+    "package": 86,
     "system": 0,
 }
 
@@ -40,6 +42,7 @@ TOPIC_LABELS = {
     "colombia": "Colombia",
     "watcher": "Watchers",
     "earthquake": "Earthquakes",
+    "package": "Packages",
     "system": "Pulse",
 }
 
@@ -148,6 +151,7 @@ def load_config(test_config: dict | None = None) -> dict:
             "colombia": 240,
             "watcher": 240,
             "earthquake": 60,
+            "package": 360,
             "system": 0,
         }, **(_json("PULSE_NOTIFICATION_COOLDOWNS_JSON", {}) or {})},
         "NOTIFICATION_MAX_AGE": {**{
@@ -158,11 +162,14 @@ def load_config(test_config: dict | None = None) -> dict:
             "colombia": 720,
             "watcher": 720,
             "earthquake": 360,
+            "package": 1440,
             "system": 1440,
         }, **(_json("PULSE_NOTIFICATION_MAX_AGE_JSON", {}) or {})},
         "MAX_NOTIFICATIONS_PER_RUN": max(1, min(5, int(os.environ.get("PULSE_MAX_NOTIFICATIONS_PER_RUN", "2")))),
         "URGENT_NOTIFY_SCORE": max(95, min(100, int(os.environ.get("PULSE_URGENT_NOTIFY_SCORE", "98")))),
         "MATERIAL_UPDATE_SCORE_DELTA": max(5, min(40, int(os.environ.get("PULSE_MATERIAL_UPDATE_SCORE_DELTA", "12")))),
+        "MORNING_CATCHUP_ENABLED": _bool("PULSE_MORNING_CATCHUP_ENABLED", True),
+        "MORNING_CATCHUP_WINDOW_MINUTES": max(15, min(180, int(os.environ.get("PULSE_MORNING_CATCHUP_WINDOW_MINUTES", "60")))),
         "VAPID_PUBLIC_KEY": os.environ.get("PULSE_VAPID_PUBLIC_KEY", ""),
         "VAPID_PRIVATE_KEY": os.environ.get("PULSE_VAPID_PRIVATE_KEY", ""),
         "VAPID_SUBJECT": os.environ.get("PULSE_VAPID_SUBJECT", ""),
@@ -193,6 +200,7 @@ def load_config(test_config: dict | None = None) -> dict:
         "TRACKED_ENTITIES": _json("PULSE_TRACKED_ENTITIES_JSON", DEFAULT_TRACKED_ENTITIES) or DEFAULT_TRACKED_ENTITIES,
         "RSS_SOURCES": _json("PULSE_RSS_SOURCES_JSON", []) or [],
         "URL_WATCHERS": _json("PULSE_URL_WATCHERS_JSON", []) or [],
+        "PACKAGE_WATCHERS": _json("PULSE_PACKAGE_WATCHERS_JSON", []) or [],
         "COLOMBIA_RSS_URL": os.environ.get("PULSE_COLOMBIA_RSS_URL", ""),
         "SHORTCUT_TOKEN": os.environ.get("PULSE_SHORTCUT_TOKEN", ""),
         "SESSION_SECRET": os.environ.get("PULSE_SECRET_KEY") or secrets.token_urlsafe(32),

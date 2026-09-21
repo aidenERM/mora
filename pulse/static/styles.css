@@ -95,6 +95,10 @@ input:focus { border-color: var(--cyan); }
 textarea { width: 100%; min-height: 8rem; padding: .7rem .75rem; border: 1px solid var(--line); border-radius: 12px; color: #dce8f5; background: #0a101b; outline: none; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .75rem; line-height: 1.45; resize: vertical; }
 textarea:focus { border-color: var(--cyan); }
 .thresholds { display: grid; gap: .65rem; }
+.diagnostics { margin-top: 1rem; }
+.diagnostic-row { display: flex; justify-content: space-between; gap: 1rem; padding: .35rem 0; border-bottom: 1px solid rgba(255,255,255,.06); font-size: .78rem; }
+.diagnostic-components { margin-top: .7rem; }
+.debug-output { max-height: 18rem; overflow: auto; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.22); border-radius: .6rem; padding: .7rem; font: .7rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; color: #b9c3d4; }
 .field-note { margin: 0 0 .2rem; font-size: .78rem; }
 .threshold-row { display: grid; grid-template-columns: 7.3rem 1fr 2.2rem; align-items: center; gap: .6rem; font-size: .8rem; }
 input[type="range"] { min-height: 26px; padding: 0; accent-color: var(--cyan); }

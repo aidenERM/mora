@@ -5,6 +5,7 @@ const state = {
   preferences: null,
   discovery: null,
   learning: null,
+  audit: null,
   subscription: false,
   detail: null,
   serviceWorkerRegistration: null,
@@ -130,11 +131,12 @@ async function enableAlerts() {
 }
 
 async function loadAuthenticatedState() {
-  const [events, preferences, discovery, learning] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning")]);
+  const [events, preferences, discovery, learning, audit] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&limit=30")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
   state.discovery = discovery;
   state.learning = learning;
+  state.audit = audit;
   await checkSubscription();
 }
 
@@ -193,7 +195,15 @@ function learningCard() {
   const followed = Object.keys(state.learning?.followed_entities || {}).length;
   const lessLike = Object.keys(state.learning?.less_like_entities || {}).length + Object.keys(state.learning?.less_like_topics || {}).length;
   const average = metrics.average_time_to_open_seconds == null ? "—" : `${Math.round(metrics.average_time_to_open_seconds / 60)}m`;
-  return `<details class="rules-card"><summary><span><span class="eyebrow">feedback</span><strong>what Pulse is learning</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">explicit follow and less-like choices change scoring. opening and source clicks are recorded as signals.</p><div class="learning-stats"><span><strong>${Number(summary.delivered || 0)}</strong> delivered</span><span><strong>${Number(summary.opened || 0)}</strong> opened</span><span><strong>${followed}</strong> followed</span><span><strong>${lessLike}</strong> less like</span></div><p class="fine-print">average time to open: ${average} · delivered but not opened: ${Number(metrics.delivered_not_opened || 0)}</p><button class="button ghost-button full" data-action="reset-learning">reset feedback history</button></div></details>`;
+  return `<details class="rules-card"><summary><span><span class="eyebrow">feedback</span><strong>what Pulse is learning</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">useful, not useful, too late, follow, and less-like choices change scoring gradually. opening and source clicks are recorded as signals.</p><div class="learning-stats"><span><strong>${Number(summary.delivered || 0)}</strong> delivered</span><span><strong>${Number(summary.opened || 0)}</strong> opened</span><span><strong>${followed}</strong> followed</span><span><strong>${lessLike}</strong> less like</span></div><p class="fine-print">average time to open: ${average} · delivered but not opened: ${Number(metrics.delivered_not_opened || 0)}</p><button class="button ghost-button full" data-action="reset-learning">reset feedback history</button></div></details>`;
+}
+
+function auditCard() {
+  const decisions = state.audit?.decisions || [];
+  const suppressed = decisions.filter((item) => !item.allowed);
+  const reasons = [...new Set(suppressed.map((item) => item.reason))].slice(0, 5).join(" · ") || "none recently";
+  const rows = decisions.slice(0, 6).map((item) => `<a class="source-row" href="/event/${encodeURIComponent(item.event_id)}"><span>${escapeHtml(item.reason)}</span><span>${item.score}/100 · ${escapeHtml(item.event_id.slice(0, 10))}</span></a>`).join("");
+  return `<details class="rules-card"><summary><span><span class="eyebrow">debug</span><strong>notification audit and simulator</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">${decisions.length} near-threshold decisions recorded · suppressed reasons: ${escapeHtml(reasons)}</p><div class="source-list">${rows || "<p class='fine-print'>no near-threshold decisions yet</p>"}</div><form id="simulator-form" class="password-form"><label>existing event id<input id="simulator-event-id" placeholder="leave blank for a sample"></label><label>sample title<input id="simulator-title" placeholder="only used when event id is blank"></label><label>sample topic<input id="simulator-topic" value="watcher"></label><label>sample summary<textarea id="simulator-summary" rows="3" placeholder="what happened and why it might matter"></textarea></label><button class="button secondary full" type="submit">simulate without sending</button></form><pre id="simulation-result" class="debug-output">no simulation run</pre><p class="fine-print">simulation uses the live scoring, freshness, cooldown, trust, interest, and quiet-hour rules. it never sends a push.</p></div></details>`;
 }
 
 function detailQuality(event) {
@@ -205,18 +215,26 @@ function detailQuality(event) {
   return `<div class="quality-card"><span class="eyebrow">evidence quality</span><div class="quality-row"><span class="confidence confidence-${escapeHtml(confidence)}">${escapeHtml(confidence)}</span><span class="muted">${sources.length || 1} source${sources.length === 1 ? "" : "s"}</span><span class="muted">${escapeHtml(metadata.verification || "direct watcher")}</span></div>${tracked ? `<p class="fine-print">tracked: ${escapeHtml(tracked)}</p>` : ""}${sourceLinks ? `<div class="source-list">${sourceLinks}</div>` : ""}</div>`;
 }
 
+function detailDiagnostics(event) {
+  const trace = event.decision_trace || {};
+  const components = trace.score_components || event.metadata?.score_components || {};
+  const rows = Object.entries(components).map(([key, value]) => `<div class="diagnostic-row"><span>${escapeHtml(key)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  const provenance = event.provenance || {};
+  return `<div class="quality-card diagnostics"><span class="eyebrow">decision trace</span><div class="diagnostic-row"><span>canonical event</span><strong>${escapeHtml(event.canonical_event_id || "—")}</strong></div><div class="diagnostic-row"><span>story cluster</span><strong>${escapeHtml(event.cluster_id || "—")}</strong></div><div class="diagnostic-row"><span>development</span><strong>${escapeHtml(event.development_id || "—")}</strong></div><div class="diagnostic-row"><span>tier</span><strong>${escapeHtml(trace.notification_tier || event.priority || "—")}</strong></div><div class="diagnostic-row"><span>freshness</span><strong>${escapeHtml(trace.freshness?.state || "not evaluated")}</strong></div><div class="diagnostic-row"><span>cooldown</span><strong>${trace.cooldown?.active ? `active until ${escapeHtml(trace.cooldown.until || "later")}` : "clear"}</strong></div><div class="diagnostic-row"><span>source trust</span><strong>${escapeHtml(trace.source_trust || event.metadata?.source_trust || "—")} (${escapeHtml(trace.source_trust_contribution ?? "0")})</strong></div><div class="diagnostic-row"><span>personal interest</span><strong>${escapeHtml(trace.personalized_interest_contribution ?? components.personal_interest ?? "0")}</strong></div><div class="diagnostic-row"><span>local relevance</span><strong>${escapeHtml(trace.local_relevance || "none")}</strong></div><div class="diagnostic-row"><span>push state</span><strong>${trace.pushed ? "pushed" : escapeHtml(event.notification_reason || "not pushed")}</strong></div><div class="diagnostic-components">${rows}</div><details><summary>provenance</summary><pre class="debug-output">${escapeHtml(JSON.stringify(provenance, null, 2))}</pre></details></div>`;
+}
+
 function detailFeedback(event) {
   const metadata = event.metadata || {};
   const ids = metadata.entities || [];
   const names = metadata.entity_names || [];
   const followButtons = ids.map((id, index) => `<button class="button ghost-button" data-action="follow" data-event-id="${escapeHtml(event.id)}" data-entity-id="${escapeHtml(id)}">follow ${escapeHtml(names[index] || id)}</button>`).join("");
-  return `<div class="feedback-row">${followButtons}<button class="button ghost-button" data-action="less-like" data-event-id="${escapeHtml(event.id)}">less like this</button></div>`;
+  return `<div class="feedback-row"><button class="button ghost-button" data-action="feedback" data-feedback="useful" data-event-id="${escapeHtml(event.id)}">useful</button><button class="button ghost-button" data-action="feedback" data-feedback="not_useful" data-event-id="${escapeHtml(event.id)}">not useful</button><button class="button ghost-button" data-action="feedback" data-feedback="too_late" data-event-id="${escapeHtml(event.id)}">too late</button>${followButtons}<button class="button ghost-button" data-action="less-like" data-event-id="${escapeHtml(event.id)}">less like this</button></div>`;
 }
 
 function renderHome() {
   document.title = "Pulse · quiet signals";
   const events = state.events.length ? state.events.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}${discoveryCard()}${learningCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -229,7 +247,7 @@ async function renderDetail(eventId) {
     if (!event) throw new Error("event not found");
     await api(`/api/events/${encodeURIComponent(event.id)}/opened`, { method: "POST", body: "{}" }).catch(() => {});
     document.title = `${event.title} · Pulse`;
-    app.innerHTML = `<section class="detail-page"><button class="back-button" data-action="back">← history</button><div class="detail-kicker"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span>${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></div><h1>${escapeHtml(event.title)}</h1><p class="detail-summary">${escapeHtml(event.summary || event.body || "")}</p><div class="why-card"><span class="eyebrow">why Pulse surfaced this</span><p>${escapeHtml(event.body || "matched your relevance rules")}</p><div class="signal-meter"><span style="width:${Math.max(4, Math.min(100, event.score))}%"></span></div><div class="meter-label"><span>${escapeHtml(event.priority)} priority</span><span>${event.score}/100</span></div></div>${detailQuality(event)}<div class="detail-actions"><a class="button" data-action="source-click" data-event-id="${escapeHtml(event.id)}" href="${escapeHtml(event.url)}" target="_blank" rel="noreferrer">open source</a><button class="button secondary" data-action="remind" data-event-id="${escapeHtml(event.id)}">remind me</button><button class="button ghost-button" data-action="mute" data-topic="${escapeHtml(event.topic)}">mute topic</button></div>${detailFeedback(event)}<p class="fine-print">event id ${escapeHtml(event.id)}</p></section>`;
+    app.innerHTML = `<section class="detail-page"><button class="back-button" data-action="back">← history</button><div class="detail-kicker"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span>${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></div><h1>${escapeHtml(event.title)}</h1><p class="detail-summary">${escapeHtml(event.summary || event.body || "")}</p><div class="why-card"><span class="eyebrow">why Pulse surfaced this</span><p>${escapeHtml(event.body || "matched your relevance rules")}</p><div class="signal-meter"><span style="width:${Math.max(4, Math.min(100, event.score))}%"></span></div><div class="meter-label"><span>${escapeHtml(event.priority)} priority</span><span>${event.score}/100</span></div></div>${detailQuality(event)}${detailDiagnostics(event)}<div class="detail-actions"><a class="button" data-action="source-click" data-event-id="${escapeHtml(event.id)}" href="${escapeHtml(event.url)}" target="_blank" rel="noreferrer">open source</a><button class="button secondary" data-action="remind" data-event-id="${escapeHtml(event.id)}">remind me</button><button class="button ghost-button" data-action="mute" data-topic="${escapeHtml(event.topic)}">mute topic</button></div>${detailFeedback(event)}<p class="fine-print">event id ${escapeHtml(event.id)}</p></section>`;
   } catch (error) {
     app.innerHTML = `<section class="empty-state"><h2>signal unavailable</h2><p>${escapeHtml(error.message)}</p><button class="button" data-action="back">back to history</button></section>`;
   }
@@ -263,6 +281,17 @@ async function bootstrap() {
 
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (event.target.id === "simulator-form") {
+    const eventId = document.querySelector("#simulator-event-id").value.trim();
+    const payload = eventId ? { event_id: eventId } : { topic: document.querySelector("#simulator-topic").value.trim(), title: document.querySelector("#simulator-title").value.trim() || "sample event", summary: document.querySelector("#simulator-summary").value.trim() };
+    try {
+      const result = await api("/api/debug/simulate", { method: "POST", body: JSON.stringify(payload) });
+      document.querySelector("#simulation-result").textContent = JSON.stringify({ allowed: result.allowed, reason: result.reason, trace: result.trace }, null, 2);
+    } catch (error) {
+      document.querySelector("#simulation-result").textContent = error.message;
+    }
+    return;
+  }
   if (event.target.id === "password-form") {
     const form = event.target;
     const values = Object.fromEntries(new FormData(form).entries());
@@ -312,6 +341,13 @@ document.addEventListener("click", async (event) => {
       await api(`/api/events/${encodeURIComponent(eventId)}/feedback`, { method: "POST", body: JSON.stringify({ action: action === "follow" ? "follow" : "less_like", ...(entityId ? { entity_id: entityId } : {}) }) });
       state.learning = await api("/api/learning");
       showToast(action === "follow" ? "interest followed" : "we will show less like this");
+    }
+    if (action === "feedback") {
+      const eventId = event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id;
+      const feedback = event.target.closest("[data-feedback]")?.dataset.feedback;
+      await api(`/api/events/${encodeURIComponent(eventId)}/feedback`, { method: "POST", body: JSON.stringify({ action: feedback }) });
+      state.learning = await api("/api/learning");
+      showToast(feedback === "useful" ? "saved as useful" : feedback === "too_late" ? "saved as too late" : "saved as not useful");
     }
     if (action === "save-rules") {
       const thresholds = Object.fromEntries([...document.querySelectorAll("[data-threshold-topic]")].map((input) => [input.dataset.thresholdTopic, Number(input.value)]));

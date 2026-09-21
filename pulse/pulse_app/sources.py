@@ -15,7 +15,7 @@ import requests
 from xml.etree import ElementTree
 
 from .config import TOPIC_LABELS
-from .rules import annotate_candidate, canonical_url, clean_text, score_item
+from .rules import annotate_candidate, canonical_url, clean_text, normalize, score_item
 from .storage import get_source_state, save_source_state
 
 LOGGER = logging.getLogger(__name__)
@@ -131,6 +131,8 @@ def configured_sources(config: dict) -> list[dict]:
         sources.append({"kind": "rss", "trust": "reliable_secondary", **source})
     for source in config.get("URL_WATCHERS", []):
         sources.append({"kind": "url", "trust": "reliable_secondary", **source})
+    for source in config.get("PACKAGE_WATCHERS", []):
+        sources.append({"kind": "package", "trust": "reliable_secondary", "topic": "package", **source})
     for repo in config.get("GITHUB_REPOS", []):
         source_id = "github:" + repo.lower()
         sources.append({"id": source_id, "kind": "github", "label": repo, "repo": repo, "topic": "github", "trust": "primary", "keywords": [], "always_relevant": True})
@@ -197,6 +199,48 @@ def _url_candidates(conn, source: dict) -> list[dict]:
     if not changed and not initializing:
         return []
     return [_source_item(source, {"title": snapshot["title"], "summary": snapshot["summary"], "url": source["url"]}, initial_suppress=initializing)]
+
+
+def _package_status(snapshot: dict) -> str:
+    text = normalize(snapshot.get("title", "") + " " + snapshot.get("summary", ""))
+    if re.search(r"delayed|delay|exception|returned|return to sender|problema|retras", text):
+        return "exception"
+    if re.search(r"out for delivery|out for shipment|en reparto|entrega hoy", text):
+        return "out_for_delivery"
+    if re.search(r"delivered|entregado|entregada", text):
+        return "delivered"
+    if re.search(r"shipped|in transit|transit|en camino|despach", text):
+        return "in_transit"
+    if re.search(r"label created|pre-shipment|created", text):
+        return "label_created"
+    return "unknown"
+
+
+def _package_candidates(conn, source: dict) -> list[dict]:
+    snapshot = _html_snapshot(_request(source["url"], {"Accept": "text/html,application/xhtml+xml"}))
+    package_id = str(source.get("package_id") or source["id"])
+    status = _package_status(snapshot)
+    state = get_source_state(conn, source["id"])
+    initializing = not bool(state.get("initialized"))
+    changed = status != state.get("status") or snapshot["digest"] != state.get("digest")
+    save_source_state(conn, source["id"], {"initialized": True, "status": status, "digest": snapshot["digest"]})
+    if not changed and not initializing:
+        return []
+    if status == "unknown" and not initializing:
+        return []
+    score = {"exception": 96, "out_for_delivery": 90, "delivered": 86, "in_transit": 72, "label_created": 45, "unknown": 20}[status]
+    title = f"Package update: {status.replace('_', ' ')}"
+    candidate = _source_item(
+        {"id": source["id"], "kind": "package", "label": source.get("label", package_id), "topic": "package", "trust": source.get("trust", "reliable_secondary"), "keywords": []},
+        {"title": title, "summary": snapshot["summary"], "url": source["url"], "guid": package_id},
+        initial_suppress=initializing,
+        score_override=score,
+    )
+    candidate["canonical_key"] = source["id"] + ":" + hashlib.sha256(package_id.encode("utf-8")).hexdigest()[:24]
+    candidate["id"] = hashlib.sha256(candidate["canonical_key"].encode("utf-8")).hexdigest()[:20]
+    candidate["body"] = f"package state changed to {status.replace('_', ' ')}"
+    candidate["metadata"].update({"package_id": package_id, "package_status": status, "package_label": source.get("label", package_id)})
+    return [candidate]
 
 
 def _github_candidates(conn, source: dict, config: dict) -> list[dict]:
@@ -407,6 +451,14 @@ def weather_candidates(conn, config: dict) -> list[dict]:
                 str(int(max(temperatures_seen or [0]) // 2)), str(int(min(temperatures_seen or [0]) // 2)),
             ]),
             "safety_critical": category in {"storm", "wind"},
+            "plan_impact": {
+                "storm": "Outdoor plans or travel around La Ceja may be disrupted.",
+                "rain": "Carry rain protection and expect outdoor plans around La Ceja to be affected.",
+                "hot": "Heat may affect outdoor plans and comfort around La Ceja.",
+                "cold": "The unusual cold may affect early or outdoor plans around La Ceja.",
+                "wind": "Strong wind may affect travel or exposed outdoor plans around La Ceja.",
+                "fog": "Reduced visibility may affect travel around La Ceja.",
+            }.get(category, "It may affect plans around La Ceja."),
             "lookahead_hours": config["WEATHER_LOOKAHEAD_HOURS"],
             "peak_precipitation_probability": peak_probability,
             "peak_precipitation_mm": round(peak_amount, 1),
@@ -489,6 +541,7 @@ def earthquake_candidates(conn, config: dict) -> list[dict]:
         candidate["relevant"] = relevant
         candidate["metadata"].update({
             "earthquake_id": event_key,
+            "location": "La Ceja, Antioquia",
             "magnitude": magnitude,
             "distance_km": round(distance, 1),
             "depth_km": round(depth, 1),
@@ -516,6 +569,8 @@ def collect_candidates(conn, config: dict) -> list[dict]:
                 candidates.extend(_rss_candidates(conn, source))
             elif source["kind"] == "url":
                 candidates.extend(_url_candidates(conn, source))
+            elif source["kind"] == "package":
+                candidates.extend(_package_candidates(conn, source))
             elif source["kind"] == "github":
                 candidates.extend(_github_candidates(conn, source, config))
         except Exception as exc:

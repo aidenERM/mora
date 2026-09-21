@@ -21,6 +21,7 @@ TOKEN_STOPWORDS = {
     "this", "today", "update", "updates", "what", "with", "your",
 }
 TRUST_RANK = {"community": 1, "reliable_secondary": 2, "primary": 3}
+TRUST_CONTRIBUTION = {"community": -8, "reliable_secondary": 2, "primary": 8}
 
 
 def clean_text(value: str, limit: int = 800) -> str:
@@ -90,7 +91,8 @@ def notification_copy(event: dict) -> tuple[str, str]:
     topic = event.get("topic")
     if topic == "weather":
         label = metadata.get("weather_label") or "your area"
-        why = f"It may affect plans around {label}."
+        impact = metadata.get("plan_impact") or f"It may affect plans around {label}."
+        why = f"{impact}"
     elif topic == "earthquake":
         why = "Pulse estimated that it could matter near La Ceja."
     elif metadata.get("entity_names"):
@@ -103,6 +105,7 @@ def notification_copy(event: dict) -> tuple[str, str]:
             "github": "It affects a project Pulse is watching.",
             "colombia": "It may affect Colombia or local plans.",
             "watcher": "It changed a source you asked Pulse to watch.",
+            "package": "It is a meaningful delivery-status change.",
             "system": "It was created directly in Pulse.",
         }.get(topic, "Pulse judged it worth checking.")
     if normalize(why.rstrip(".")) not in normalize(body):
@@ -132,6 +135,58 @@ def event_fingerprint(event: dict) -> str:
             sorted(metadata.get("entities") or []),
         ]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def cluster_id_for(event: dict) -> str:
+    metadata = event.get("metadata") or {}
+    if metadata.get("cluster_id"):
+        return str(metadata["cluster_id"])
+    if metadata.get("weather_category"):
+        identity = [event.get("topic"), metadata.get("weather_category"), metadata.get("alert_window")]
+    elif metadata.get("earthquake_id"):
+        identity = [event.get("topic"), metadata.get("earthquake_id")]
+    else:
+        identity = [event.get("topic"), sorted(significant_tokens(clean_event_title(event))), sorted(metadata.get("entities") or [])]
+    return "cluster-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+
+
+def domain_adjustment(candidate: dict) -> tuple[int, str]:
+    """Small domain-aware quality adjustment, kept deterministic and inspectable."""
+    topic = candidate.get("topic")
+    text = normalize((candidate.get("title", "") + " " + candidate.get("summary", "")))
+    if topic == "warzone":
+        useful = ("patch", "balance", "nerf", "buff", "weapon", "ranked", "outage", "season", "ricochet")
+        low_value = ("store", "bundle", "skin", "cosmetic", "creator code", "rumor")
+        if any(term in text for term in useful):
+            return 8, "gaming impact signal"
+        if any(term in text for term in low_value):
+            return -14, "gaming low-value signal"
+    if topic == "apple":
+        useful = ("release", "released", "ios", "security", "recall", "available", "update", "announcement")
+        low_value = ("rumor", "concept", "case", "accessory", "deal", "wallpaper")
+        if any(term in text for term in useful):
+            return 8, "product-impact signal"
+        if any(term in text for term in low_value):
+            return -12, "apple low-value signal"
+    if topic == "github":
+        useful = ("security", "breaking", "major", "release", "deprecated", "outage")
+        if any(term in text for term in useful):
+            return 8, "developer-impact signal"
+        if candidate.get("source_kind") in {"github", "github_webhook"}:
+            return -6, "routine developer activity"
+    return 0, "domain profile neutral"
+
+
+def notification_tier(event: dict, config: dict | None = None) -> str:
+    config = config or {"URGENT_NOTIFY_SCORE": 98}
+    if _safety_critical(event, config) and int(event.get("score", 0)) >= int(config.get("URGENT_NOTIFY_SCORE", 98)):
+        return "urgent"
+    score = int(event.get("score", 0))
+    if score >= 88:
+        return "high"
+    if score >= 75:
+        return "normal"
+    return "low"
 
 
 def events_similar(left: dict, right: dict) -> bool:
@@ -215,12 +270,26 @@ def matched_entities(text: str, entities: list[dict]) -> list[dict]:
 
 def annotate_candidate(candidate: dict, entities: list[dict]) -> dict:
     metadata = dict(candidate.get("metadata") or {})
+    components = dict(metadata.get("score_components") or {})
+    base_score = int(candidate.get("score", 0))
+    components.setdefault("source_rule", base_score)
+    trust = metadata.get("source_trust", "reliable_secondary")
+    components.setdefault("source_trust", TRUST_CONTRIBUTION.get(trust, 0))
     matches = matched_entities(candidate.get("title", "") + " " + candidate.get("summary", ""), entities)
     boost = min(30, sum(max(0, int(item.get("boost", 0))) for item in matches))
     if boost:
         candidate["score"] = min(100, int(candidate.get("score", 0)) + boost)
         names = ", ".join(item.get("name", item.get("id", "")) for item in matches[:4])
         candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; tracked: " + names
+    components["personal_interest"] = boost
+    adjustment, adjustment_reason = domain_adjustment(candidate)
+    if adjustment:
+        candidate["score"] = max(0, min(100, int(candidate.get("score", 0)) + adjustment))
+        candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; " + adjustment_reason
+    components["domain"] = adjustment
+    components["final"] = int(candidate.get("score", 0))
+    metadata["score_components"] = components
+    metadata["cluster_id"] = cluster_id_for(candidate)
     metadata["entities"] = [item.get("id") for item in matches if item.get("id")]
     metadata["entity_names"] = [item.get("name", item.get("id", "")) for item in matches]
     candidate["metadata"] = metadata
@@ -256,13 +325,18 @@ def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
     if source_weight:
         adjustment += max(-8, min(8, source_weight))
         reasons.append("source learning")
-    if (candidate.get("metadata") or {}).get("safety_critical") and adjustment < 0:
+    safety_floor = (candidate.get("metadata") or {}).get("safety_critical") or (int(candidate.get("score", 0)) >= 98 and candidate.get("topic") in {"weather", "earthquake"})
+    if safety_floor and adjustment < 0:
         adjustment = max(0, adjustment)
         reasons.append("safety floor")
     if adjustment:
         candidate["score"] = max(0, min(100, int(candidate.get("score", 0)) + adjustment))
         candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; " + ", ".join(reasons)
         candidate["priority"] = priority_for(candidate["score"])
+    components = dict((candidate.get("metadata") or {}).get("score_components") or {})
+    components["learning"] = adjustment
+    components["final"] = int(candidate.get("score", 0))
+    candidate.setdefault("metadata", {})["score_components"] = components
     return candidate
 
 
@@ -354,7 +428,51 @@ def _cooldown_active(event: dict, now: datetime, config: dict, conn=None) -> boo
     return bool(last_topic and now - last_topic < timedelta(minutes=cooldown))
 
 
-def notification_decision(event: dict, prefs: dict, now: datetime | None = None, config: dict | None = None, conn=None) -> tuple[bool, str]:
+def _freshness_details(event: dict, now: datetime, config: dict) -> dict:
+    metadata = event.get("metadata") or {}
+    timezone_name = config.get("TIMEZONE", "UTC")
+    timestamp_value = metadata.get("latest_forecast_at") if event.get("topic") == "weather" else (event.get("published_at") or event.get("discovered_at"))
+    timestamp = _parse_datetime(timestamp_value, timezone_name)
+    if not timestamp:
+        return {"state": "unknown", "score": 50, "age_minutes": None, "max_age_minutes": None}
+    age = round((now - timestamp).total_seconds() / 60)
+    if event.get("topic") == "weather":
+        fresh = age <= 15
+        return {"state": "fresh" if fresh else "stale", "score": 100 if fresh else 0, "age_minutes": age, "max_age_minutes": 15}
+    max_age = int((config.get("NOTIFICATION_MAX_AGE") or {}).get(event.get("topic"), 720))
+    score = max(0, min(100, round(100 - max(0, age) * 100 / max(1, max_age))))
+    return {"state": "fresh" if age <= max_age else "stale", "score": score, "age_minutes": age, "max_age_minutes": max_age}
+
+
+def _cooldown_details(event: dict, now: datetime, config: dict, conn=None) -> dict:
+    cooldown = int((config.get("NOTIFICATION_COOLDOWNS") or {}).get(event.get("topic"), 180))
+    details = {"active": False, "minutes": cooldown, "event_last": event.get("last_notification_at"), "topic_last": None, "until": None}
+    if cooldown <= 0:
+        return details
+    if _safety_critical(event, config) and int(event.get("score", 0)) >= int(config.get("URGENT_NOTIFY_SCORE", 98)):
+        details["bypassed_for_safety"] = True
+        return details
+    candidates = []
+    event_last = _parse_datetime(event.get("last_notification_at"))
+    if event_last:
+        candidates.append(("event", event_last))
+    if conn is not None:
+        row = conn.execute(
+            "SELECT MAX(last_notification_at) AS last_sent FROM events WHERE topic=? AND id<>? AND last_notification_at IS NOT NULL",
+            (event.get("topic"), event.get("id")),
+        ).fetchone()
+        topic_last = _parse_datetime(row["last_sent"] if row else None)
+        if topic_last:
+            candidates.append(("topic", topic_last))
+            details["topic_last"] = topic_last.isoformat()
+    if candidates:
+        kind, latest = max(candidates, key=lambda item: item[1])
+        until = latest + timedelta(minutes=cooldown)
+        details.update({"active": now < until, "kind": kind, "until": until.isoformat()})
+    return details
+
+
+def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None, config: dict | None = None, conn=None) -> tuple[bool, str, dict]:
     config = config or {
         "STRICT_MIN_THRESHOLDS": STRICT_MIN_THRESHOLDS,
         "URGENT_NOTIFY_SCORE": 98,
@@ -363,24 +481,67 @@ def notification_decision(event: dict, prefs: dict, now: datetime | None = None,
         "TIMEZONE": prefs.get("timezone", "UTC"),
     }
     now = now or datetime.now(timezone.utc)
-    if not event.get("relevant"):
-        return False, "not relevant"
     threshold = max(
         int((prefs.get("topic_thresholds") or {}).get(event["topic"], 80)),
         int((config.get("STRICT_MIN_THRESHOLDS") or STRICT_MIN_THRESHOLDS).get(event.get("topic"), 80)),
     )
-    if event["score"] < threshold:
-        return False, f"score {event['score']} below {threshold} threshold"
+    freshness = _freshness_details(event, now, config)
+    cooldown = _cooldown_details(event, now, config, conn)
+    components = dict((event.get("metadata") or {}).get("score_components") or {})
+    raw_score = int(event.get("score", 0))
+    # Keep source scoring stable, but make older stories gradually less likely
+    # to interrupt. Unknown timestamps are left unchanged; they should be
+    # observable in the trace rather than silently penalized.
+    if freshness["state"] == "unknown":
+        effective_score = raw_score
+    else:
+        freshness_factor = 0.5 + (float(freshness["score"]) / 200.0)
+        effective_score = max(0, min(100, round(raw_score * freshness_factor)))
+    components["freshness_decay"] = raw_score - effective_score
+    trace = {
+        "evaluated_at": now.replace(microsecond=0).isoformat(),
+        "canonical_event_id": event.get("canonical_event_id", ""),
+        "cluster_id": event.get("cluster_id") or (event.get("metadata") or {}).get("cluster_id", ""),
+        "development_id": event.get("development_id") or (event.get("metadata") or {}).get("development_id", ""),
+        "normalized_title": event.get("normalized_title") or normalize(clean_event_title(event)),
+        "topic": event.get("topic"),
+        "entities": event.get("normalized_entities") or (event.get("metadata") or {}).get("entities", []),
+        "location": event.get("normalized_location") or (event.get("metadata") or {}).get("location", ""),
+        "score": raw_score,
+        "effective_score": effective_score,
+        "threshold": threshold,
+        "score_components": components,
+        "source_trust": (event.get("metadata") or {}).get("source_trust", "unknown"),
+        "source_trust_contribution": components.get("source_trust", 0),
+        "personalized_interest_contribution": components.get("personal_interest", 0) + components.get("learning", 0),
+        "local_relevance": (event.get("metadata") or {}).get("local_impact") or (event.get("metadata") or {}).get("weather_label", ""),
+        "freshness": freshness,
+        "notification_tier": notification_tier(event, config),
+        "cooldown": cooldown,
+        "pushed": bool(event.get("notification_count", 0)),
+        "safety_critical": _safety_critical(event, config),
+    }
+    if event.get("suppress_notification"):
+        return False, "source initialization", trace
+    if not event.get("relevant"):
+        return False, "not relevant", trace
+    if effective_score < threshold:
+        return False, f"score {effective_score} below {threshold} threshold after freshness decay", trace
     if muted_until(prefs, event["topic"]):
-        return False, "topic muted"
-    if not _fresh_for_notification(event, now, config):
-        return False, "stale event"
+        return False, "topic muted", trace
+    if freshness["state"] == "stale":
+        return False, "stale event", trace
     bypass = max(int(prefs.get("quiet_bypass_priority", 98)), int(config.get("URGENT_NOTIFY_SCORE", 98)))
     if event["score"] < bypass and is_quiet_hours(now, prefs["quiet_start"], prefs["quiet_end"], prefs["timezone"]):
-        return False, "quiet hours"
-    if _cooldown_active(event, now, config, conn):
-        return False, "topic or event cooldown"
-    return True, "relevant, fresh, and above strict threshold"
+        return False, "quiet hours", trace
+    if cooldown["active"]:
+        return False, "topic or event cooldown", trace
+    return True, "relevant, fresh, and above strict threshold", trace
+
+
+def notification_decision(event: dict, prefs: dict, now: datetime | None = None, config: dict | None = None, conn=None) -> tuple[bool, str]:
+    allowed, reason, _trace = evaluate_notification(event, prefs, now, config, conn)
+    return allowed, reason
 
 
 def should_notify(event: dict, prefs: dict, now: datetime | None = None, config: dict | None = None, conn=None) -> tuple[bool, str]:

@@ -1,4 +1,4 @@
-const CACHE = "pulse-shell-v3";
+const CACHE = "pulse-shell-v4";
 const SHELL = ["/", "/static/styles.css", "/static/app.js?v=pulse-discovery-1", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -25,8 +25,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(self.registration.showNotification(data.title || "Pulse", {
     body: data.body || "A new signal crossed your rules.",
     tag: data.tag || `pulse-${data.id || Date.now()}`,
-    renotify: true,
-    requireInteraction: data.priority === "critical",
+    renotify: data.tier === "urgent" || data.tier === "high",
+    requireInteraction: data.tier === "urgent" || data.priority === "critical",
     icon: "/icon.svg",
     badge: "/icon.svg",
     data: { url, eventId: data.id || null },

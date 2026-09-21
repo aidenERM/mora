@@ -279,6 +279,13 @@ def _candidate(cluster: list[dict], profile: dict, query: str) -> dict:
         "profile_id": profile.get("id"),
         "entities": [entity.get("id") for entity in entities],
         "entity_names": [entity.get("name", entity.get("id", "")) for entity in entities],
+        "score_components": {
+            "source_rule": score,
+            "source_trust": {"primary": 8, "reliable_secondary": 2, "community": -8}.get(best["trust"], 0),
+            "personal_interest": min(30, sum(max(0, int(entity.get("boost", 0))) for entity in entities)),
+            "confidence": {"confirmed": 8, "likely": 3, "rumor": -18}[confidence],
+            "final": score,
+        },
     }
     matched = ", ".join(metadata["entity_names"][:4])
     body = f"{confidence} discovery result from {len(source_rows)} source(s); {reason}"

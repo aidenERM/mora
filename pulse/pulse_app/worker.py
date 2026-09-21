@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from .config import load_config
 from .discovery import collect_discovery_candidates
 from .push import send_payload
-from .rules import apply_preference_adjustments, notification_copy, should_notify
+from .rules import apply_preference_adjustments, evaluate_notification, notification_copy
 from .sources import collect_candidates
-from .storage import connect, due_reminders, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, record_event_action, runtime_config, upsert_event
+from .storage import connect, create_morning_catchup, due_reminders, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, record_event_action, record_notification_decision, runtime_config, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
 
@@ -17,14 +17,18 @@ LOGGER = logging.getLogger("pulse.worker")
 def _payload(config: dict, event: dict, reminder: bool = False) -> dict:
     title, body = notification_copy(event)
     title = ("Reminder · " if reminder else "") + title
+    trace = event.get("decision_trace") or {}
+    tier = trace.get("notification_tier") or ("urgent" if event.get("priority") == "critical" else "high" if event.get("priority") == "high" else "normal")
+    identity = event.get("canonical_event_id") or event.get("cluster_id") or event["id"]
     return {
         "id": event["id"],
         "title": title[:120],
         "body": body[:220],
         "topic": event["topic"],
         "priority": event["priority"],
+        "tier": tier,
         "url": "/event/" + event["id"],
-        "tag": "pulse-event-" + event["id"],
+        "tag": "pulse-event-" + identity,
     }
 
 
@@ -59,12 +63,20 @@ def run_once(config: dict | None = None) -> dict:
             apply_preference_adjustments(candidate, preferences)
             event, created = upsert_event(conn, candidate)
             inserted += int(created)
+            if created or event.get("notification_pending") or event.get("suppress_notification"):
+                allowed, reason, trace = evaluate_notification(event, preferences, datetime.now(timezone.utc), runtime, conn)
+                record_notification_decision(conn, event, allowed, reason, trace)
             if created:
                 conn.commit()
+        morning_digest, _held_events = create_morning_catchup(conn, runtime, datetime.now(timezone.utc))
+        if morning_digest:
+            inserted += 1
+            conn.commit()
         sent_this_run = 0
         now = datetime.now(timezone.utc)
         for event in pending_events(conn, 100):
-            allowed, reason = should_notify(event, preferences, now, runtime, conn)
+            allowed, reason, trace = evaluate_notification(event, preferences, now, runtime, conn)
+            record_notification_decision(conn, event, allowed, reason, trace)
             if not allowed:
                 if reason not in {"quiet hours", "topic or event cooldown"}:
                     mark_notification_suppressed(conn, event["id"], reason)

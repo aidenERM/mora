@@ -14,7 +14,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from .config import STATIC, TOPIC_LABELS, load_config
 from .push import configured as push_configured, send_payload
-from .rules import apply_preference_adjustments, should_notify
+from .rules import annotate_candidate, apply_preference_adjustments, cluster_id_for, evaluate_notification, score_item, significant_tokens
 from .sources import github_webhook_candidate
 from .storage import (
     connect,
@@ -32,7 +32,9 @@ from .storage import (
     mark_clicked,
     mark_notification_suppressed,
     mark_notified,
+    list_notification_decisions,
     record_event_action,
+    record_notification_decision,
     runtime_config,
     save_password_hash,
     save_json_setting,
@@ -266,6 +268,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             less_like_entities=preferences.get("less_like_entities", {}),
             less_like_topics=preferences.get("less_like_topics", {}),
             learned_topic_weights=preferences.get("learned_topic_weights", {}),
+            learned_source_weights=preferences.get("learned_source_weights", {}),
         )
 
     @app.delete("/api/learning")
@@ -339,6 +342,8 @@ def create_app(test_config: dict | None = None) -> Flask:
                 prefs["less_like_topics"][event["topic"]] = _now().isoformat()
                 record_event_action(db(), event_id, "less_like", event["topic"])
             save_preferences(db(), prefs)
+        elif action in {"useful", "not_useful", "too_late"}:
+            record_event_action(db(), event_id, action)
         else:
             return jsonify(error="invalid_feedback"), 400
         db().commit()
@@ -360,6 +365,65 @@ def create_app(test_config: dict | None = None) -> Flask:
         record_event_action(db(), event_id, "remind", str(minutes))
         db().commit()
         return jsonify(event=event)
+
+    @app.get("/api/audit")
+    @require_auth
+    def notification_audit():
+        try:
+            limit = max(1, min(200, int(request.args.get("limit", "100"))))
+        except ValueError:
+            limit = 100
+        near_only = request.args.get("near_threshold", "0").lower() in {"1", "true", "yes"}
+        return jsonify(decisions=list_notification_decisions(db(), limit, near_only))
+
+    @app.post("/api/debug/simulate")
+    @require_auth
+    def notification_simulator():
+        body = _json_body()
+        conn = db()
+        if body.get("event_id"):
+            event = get_event(conn, str(body["event_id"]))
+            if not event:
+                return jsonify(error="not_found"), 404
+        else:
+            topic = str(body.get("topic", "watcher")).strip()
+            title = str(body.get("title", "")).strip()[:240]
+            summary = str(body.get("summary", "")).strip()[:700]
+            if topic not in TOPIC_LABELS or not title:
+                return jsonify(error="topic_and_title_required"), 400
+            runtime = runtime_config(conn, config)
+            keywords = body.get("keywords") if isinstance(body.get("keywords"), list) else []
+            if not keywords:
+                for profile in runtime.get("SEARCH_PROFILES", []):
+                    if profile.get("topic") == topic:
+                        keywords.extend(profile.get("keywords") or [])
+            keywords = [str(item) for item in keywords if str(item).strip()] or list(significant_tokens(title))[:8]
+            score, relevant, reason = score_item(topic, title, summary, keywords)
+            event = {
+                "id": "simulation",
+                "source_id": "simulator",
+                "source_kind": "simulator",
+                "topic": topic,
+                "title": title,
+                "summary": summary,
+                "body": reason,
+                "url": str(body.get("url", "https://pulse.moralife.uk/")),
+                "canonical_key": "simulation",
+                "published_at": _now().isoformat(),
+                "discovered_at": _now().isoformat(),
+                "score": score,
+                "priority": "critical" if score >= 90 else "high" if score >= 80 else "normal" if score >= 65 else "low",
+                "relevant": relevant,
+                "metadata": {"source_trust": str(body.get("source_trust", "reliable_secondary")), "sources": []},
+            }
+            annotate_candidate(event, runtime.get("TRACKED_ENTITIES", []))
+            event["cluster_id"] = cluster_id_for(event)
+            apply_preference_adjustments(event, get_preferences(conn, config))
+        preferences = get_preferences(conn, config)
+        allowed, reason, trace = evaluate_notification(event, preferences, _now(), config, conn)
+        trace["simulation"] = True
+        trace["would_send"] = allowed
+        return jsonify(event=event, allowed=allowed, reason=reason, trace=trace, would_send=allowed, push_sent=False)
 
     @app.delete("/api/events/<event_id>/remind")
     @require_auth
@@ -498,7 +562,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         db().commit()
         delivered = False
         if created:
-            allowed, reason = should_notify(event, preferences, _now(), config, db())
+            allowed, reason, trace = evaluate_notification(event, preferences, _now(), config, db())
+            record_notification_decision(db(), event, allowed, reason, trace)
             if allowed:
                 result = send_payload(db(), config, _payload(config, event))
                 mark_notified(db(), event["id"])
