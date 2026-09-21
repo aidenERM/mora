@@ -646,7 +646,9 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
             if name not in event_columns:
                 conn.execute(f"ALTER TABLE events ADD COLUMN {name} {definition}")
                 added = True
-        conn.execute("DROP INDEX IF EXISTS idx_events_pending")
+        # This runs from both the web service and the 15-minute worker. Do not
+        # drop/recreate the index on every process start: concurrent startup
+        # would take a schema lock and can make gunicorn fail to boot.
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_pending ON events(notification_pending, suppress_notification, score)")
         if added:
             # Existing unreviewed rows must remain history, not become a push storm

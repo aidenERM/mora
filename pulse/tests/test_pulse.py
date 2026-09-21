@@ -50,6 +50,15 @@ def test_auth_and_health(tmp_path):
     assert client.get("/api/events").json["events"] == []
 
 
+def test_database_initialization_is_idempotent(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    init_db(database)
+    conn = connect(database)
+    columns = [row[2] for row in conn.execute("PRAGMA index_info(idx_events_pending)").fetchall()]
+    assert columns == ["notification_pending", "suppress_notification", "score"]
+
+
 def test_change_password_replaces_old_password(tmp_path):
     client = make_client(tmp_path)
     login(client)
