@@ -1,4 +1,4 @@
-# pulse v0.1
+# pulse v0.2
 
 Pulse is a private, iPhone-first notification layer for `pulse.moralife.uk`.
 It stores source events in SQLite, applies deterministic relevance rules, and sends Web Push notifications. The PWA is served by the same Flask service as the API so a notification can open `/event/<id>` on the same origin.
@@ -29,11 +29,15 @@ For Windows PowerShell, use `$env:PULSE_DEV_NO_AUTH='1'` instead of the inline e
 
 The worker keeps a 15-minute cadence for direct watchers: La Ceja weather, USGS earthquakes, the official Apple Newsroom feed, the official Call of Duty blog URL, a Colombia RSS search feed, configured GitHub repositories, and optional custom RSS/URL watchers. The first successful source check seeds history without sending a notification for every old item. Notification policy is separate from checking: strict server-side score floors, freshness expiry, per-topic/event cooldowns, cross-source clustering, a two-alert run budget, and quiet hours decide whether a stored event becomes a push. Low-value, stale, muted, or duplicate events remain in history with a suppression reason. Weather looks 24 hours ahead by default and only keeps meaningful storm, heavy-rain, heat, cold, or dangerous-wind alerts; rain and wind are folded into a storm alert when appropriate. Earthquakes are retained for history but only local felt-impact or major events can notify. Notification copy is rewritten into a short title plus a reason it matters instead of forwarding raw feed text.
 
+Personal intelligence is stored in the same pipeline: package and purchase lifecycles merge by shipment/order identity, calendar context can elevate weather that may affect a near-term located plan, related topics provide weak explainable relevance signals, and a followed story boosts only its canonical event/cluster for 30 days. Authenticated Apple/Google contact records retain only minimal identity fields and can be marked important, which slightly elevates matching messages. Optional gaming countdowns can be created through `POST /api/game-events`; the worker evaluates them normally and emits at most one 24-hour and one 1-hour event per configured countdown.
+
 Optional discovery uses Brave Search server-side. It runs on its own slower cadence, three hours by default, and can run a short contextual search when a high-priority watcher changes. Every promising result is fetched and read before it becomes an event. Results keep source trust (`primary`, `reliable_secondary`, or `community`), confidence (`confirmed`, `likely`, or `rumor`), the source list, publication time when available, and matched tracked entities. A single community rumor is retained as history but suppressed from notification.
 
 Set `PULSE_BRAVE_SEARCH_API_KEY` to enable it. The key is never returned by the API or sent to the PWA. Profiles and tracked entities can be edited inside Pulse settings after the first deployment; environment JSON is available as a server-side fallback. Discovery is intentionally disabled when the key is blank.
 
 For repositories you control, set `PULSE_GITHUB_WEBHOOK_SECRET` and configure GitHub to send signed `push`, `release`, `issues`, and `pull_request` deliveries to `https://pulse.moralife.uk/api/webhooks/github`. Pulse validates the signature, ignores repositories outside `PULSE_GITHUB_REPOS`, deduplicates delivery IDs, and keeps the 15-minute GitHub release watcher as a fallback.
+
+The authenticated debug view and `/api/audit` retain the decision trace for both pushed and suppressed events. `/api/people` exposes the minimal synchronized contact list for marking importance, `/api/packages` and `/api/purchases` expose lifecycle state, and `/api/purchases/<id>/watch` sets a small purchase watch priority. These endpoints remain private and do not expose provider credentials or full message bodies.
 
 ## production deployment
 
