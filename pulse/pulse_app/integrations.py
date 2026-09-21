@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from xml.etree import ElementTree
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 import requests
 
@@ -335,6 +335,20 @@ def _hrefs(response_text: str) -> list[str]:
     return [node.text.strip() for node in root.iter() if node.tag.endswith("href") and node.text and node.text.strip()]
 
 
+def _property_href(response_text: str, property_name: str) -> str:
+    try:
+        root = ElementTree.fromstring(response_text)
+    except ElementTree.ParseError:
+        return ""
+    for node in root.iter():
+        if not node.tag.endswith(property_name):
+            continue
+        for child in node.iter():
+            if child.tag.endswith("href") and child.text and child.text.strip():
+                return child.text.strip()
+    return ""
+
+
 def _calendar_data(response_text: str) -> list[dict]:
     try:
         root = ElementTree.fromstring(response_text)
@@ -369,15 +383,17 @@ def _sync_icloud_calendar(conn, config: dict, credentials: dict) -> dict:
     propfind = """<?xml version="1.0"?><propfind xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><prop><current-user-principal/><c:calendar-home-set/></prop></propfind>"""
     root_response = _icloud_request("PROPFIND", config["ICLOUD_CALDAV_URL"], credentials, propfind, {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
     hrefs = _hrefs(root_response.text)
-    principal = next((href for href in hrefs if "principal" in href), "")
-    home = next((href for href in hrefs if "calend" in href.casefold()), "")
+    principal = _property_href(root_response.text, "current-user-principal") or next((href for href in hrefs if "principal" in href), "")
+    home = _property_href(root_response.text, "calendar-home-set")
     if principal and not home:
+        if principal.startswith("/"):
+            principal = urljoin(config["ICLOUD_CALDAV_URL"].rstrip("/") + "/", principal)
         principal_response = _icloud_request("PROPFIND", principal, credentials, propfind, {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
-        home = next((href for href in _hrefs(principal_response.text) if "calend" in href.casefold()), "")
+        home = _property_href(principal_response.text, "calendar-home-set")
     if not home:
         raise RuntimeError("Apple Calendar home was not discovered")
     if home.startswith("/"):
-        home = requests.compat.urljoin(config["ICLOUD_CALDAV_URL"], home)
+        home = urljoin(config["ICLOUD_CALDAV_URL"].rstrip("/") + "/", home)
     collection_response = _icloud_request("PROPFIND", home, credentials, "<propfind xmlns=\"DAV:\"><prop><displayname/><resourcetype/></prop></propfind>", {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
     calendars = [href for href in _hrefs(collection_response.text) if href.rstrip("/") != home.rstrip("/")]
     now = _now()
@@ -386,7 +402,7 @@ def _sync_icloud_calendar(conn, config: dict, credentials: dict) -> dict:
     event_count = 0
     for calendar_url in calendars[:30]:
         if calendar_url.startswith("/"):
-            calendar_url = requests.compat.urljoin(config["ICLOUD_CALDAV_URL"], calendar_url)
+            calendar_url = urljoin(config["ICLOUD_CALDAV_URL"].rstrip("/") + "/", calendar_url)
         try:
             response = _icloud_request("REPORT", calendar_url, credentials, report, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
         except requests.RequestException:
@@ -404,11 +420,18 @@ def _sync_icloud_calendar(conn, config: dict, credentials: dict) -> dict:
 def _sync_icloud_contacts(conn, config: dict, credentials: dict) -> dict:
     response = _icloud_request("PROPFIND", config["ICLOUD_CARDDAV_URL"], credentials, "<propfind xmlns=\"DAV:\" xmlns:card=\"urn:ietf:params:xml:ns:carddav\"><prop><current-user-principal/><card:addressbook-home-set/></prop></propfind>", {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
     hrefs = _hrefs(response.text)
-    home = next((href for href in hrefs if "contact" in href.casefold() or "addressbook" in href.casefold()), "")
+    home = _property_href(response.text, "addressbook-home-set")
+    if not home:
+        principal = _property_href(response.text, "current-user-principal") or next((href for href in hrefs if "principal" in href), "")
+        if principal:
+            if principal.startswith("/"):
+                principal = urljoin(config["ICLOUD_CARDDAV_URL"].rstrip("/") + "/", principal)
+            principal_response = _icloud_request("PROPFIND", principal, credentials, "<propfind xmlns=\"DAV:\" xmlns:card=\"urn:ietf:params:xml:ns:carddav\"><prop><card:addressbook-home-set/></prop></propfind>", {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
+            home = _property_href(principal_response.text, "addressbook-home-set")
     if not home:
         raise RuntimeError("Apple Contacts home was not discovered")
     if home.startswith("/"):
-        home = requests.compat.urljoin(config["ICLOUD_CARDDAV_URL"], home)
+        home = urljoin(config["ICLOUD_CARDDAV_URL"].rstrip("/") + "/", home)
     collection = _icloud_request("PROPFIND", home, credentials, "<propfind xmlns=\"DAV:\"><prop><displayname/><resourcetype/></prop></propfind>", {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
     addressbooks = [href for href in _hrefs(collection.text) if href.rstrip("/") != home.rstrip("/")]
     mark_success(conn, "apple-contacts", {"addressbooks": len(addressbooks)})
