@@ -14,7 +14,7 @@ from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.integrations import classify_gmail_message, consume_oauth_state, create_oauth_state, normalize_companion_payload, prepare_event_candidate
+from pulse_app.integrations import classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, prepare_event_candidate
 from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record
 
 
@@ -116,6 +116,14 @@ def test_oauth_state_is_single_use(tmp_path):
     state = create_oauth_state(conn, "google")
     assert consume_oauth_state(conn, "google", state) == {}
     assert consume_oauth_state(conn, "google", state) is None
+
+
+def test_google_authorization_requests_enabled_apis():
+    from urllib.parse import parse_qs, urlparse
+    query = parse_qs(urlparse(google_authorization_url({"GOOGLE_CLIENT_ID": "client", "GOOGLE_REDIRECT_URI": "https://pulse.moralife.uk/api/integrations/google/callback"}, "state" )).query)
+    assert "https://www.googleapis.com/auth/gmail.readonly" in query["scope"][0]
+    assert "https://www.googleapis.com/auth/calendar.readonly" in query["scope"][0]
+    assert "https://www.googleapis.com/auth/contacts.readonly" in query["scope"][0]
 
 
 def test_bedrock_structured_validation(monkeypatch):

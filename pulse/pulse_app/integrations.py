@@ -39,6 +39,7 @@ PROVIDERS = {
     "discord": "Discord",
     "aws-bedrock": "AWS Bedrock AI",
 }
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/contacts.readonly"
 
 
 def _now() -> datetime:
@@ -191,7 +192,7 @@ def google_authorization_url(config: dict, state: str) -> str:
         "client_id": config["GOOGLE_CLIENT_ID"],
         "redirect_uri": config["GOOGLE_REDIRECT_URI"],
         "response_type": "code",
-        "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly",
+        "scope": GOOGLE_SCOPES,
         "access_type": "offline",
         "prompt": "consent",
         "state": state,
@@ -342,9 +343,18 @@ def sync_google(conn, config: dict) -> dict:
             continue
         expires = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date") or start
         set_context_signal(conn, "calendar", {"event_id": item.get("id", ""), "title": item.get("summary", ""), "location": item.get("location", ""), "start": start, "end": expires}, "google-calendar", 0.98, expires)
-    mark_success(conn, "google", {"gmail_messages": len(gmail.get("messages", [])), "calendar_events": len(calendar.get("items", []))})
+    people_error = ""
+    try:
+        people = _google_get(token, "https://people.googleapis.com/v1/people/me/connections", {"pageSize": 100, "personFields": "names"})
+    except Exception as exc:
+        # Contacts are optional; a People API issue must not block Gmail or Calendar.
+        LOGGER.warning("Google People sync skipped error=%s", type(exc).__name__)
+        people = {"connections": []}
+        people_error = type(exc).__name__
+    set_context_signal(conn, "contacts", {"count": len(people.get("connections", []))}, "google-people", 0.7, _iso(_now() + timedelta(days=1)))
+    mark_success(conn, "google", {"gmail_messages": len(gmail.get("messages", [])), "calendar_events": len(calendar.get("items", [])), "contacts_count": len(people.get("connections", [])), "contacts_error": people_error})
     conn.commit()
-    return {"created": created, "gmail_messages": len(gmail.get("messages", [])), "calendar_events": len(calendar.get("items", []))}
+    return {"created": created, "gmail_messages": len(gmail.get("messages", [])), "calendar_events": len(calendar.get("items", [])), "contacts_count": len(people.get("connections", []))}
 
 
 def sync_discord(conn, config: dict) -> dict:
