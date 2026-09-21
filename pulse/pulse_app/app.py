@@ -616,6 +616,39 @@ def create_app(test_config: dict | None = None) -> Flask:
         db().commit()
         return jsonify(ok=True)
 
+    @app.post("/api/events/<event_id>/draft-reply")
+    @require_auth
+    def event_draft_reply(event_id: str):
+        event = get_event(db(), event_id)
+        if not event:
+            return jsonify(error="not_found"), 404
+        metadata = event.get("metadata") or {}
+        if not (metadata.get("sender") and (metadata.get("gmail_message_id") or metadata.get("mail_message_id"))):
+            return jsonify(error="not_a_message_event"), 400
+        tone = str(_json_body().get("tone", "brief and friendly")).strip()[:80] or "brief and friendly"
+        payload = {
+            "sender": str(metadata.get("sender", ""))[:160],
+            "subject": str(event.get("title", ""))[:240],
+            "summary": str(event.get("summary", ""))[:700],
+            "topic": str(event.get("topic", ""))[:80],
+            "tone": tone,
+        }
+        value, ai_metadata = classify_or_fallback(
+            config,
+            "Draft a short reply for Aiden to review. Never claim it was sent. Use only the supplied subject and summary. Return a practical draft, not analysis.",
+            payload,
+            {"draft": "string", "needs_review": "boolean"},
+        )
+        if value and str(value.get("draft", "")).strip():
+            return jsonify(draft=str(value["draft"]).strip()[:2400], needs_review=True, generated_by=ai_metadata.get("model", "luna"), metadata={"safe_to_continue": True})
+        fallback = {
+            "package": "Hi, thanks for the update. Could you confirm the latest delivery details?",
+            "security": "Thanks for letting me know. I’ll review this and follow up if I need anything else.",
+            "school": "Hi, thanks for the update. I’ll review the details and get back to you shortly.",
+            "travel": "Thanks for the update. I’ll review the details and confirm what I need to do next.",
+        }.get(event.get("topic"), "Hi, thanks for the message. I’ll review this and get back to you shortly.")
+        return jsonify(draft=fallback, needs_review=True, generated_by="deterministic fallback", metadata={"safe_to_continue": True, "ai_failed": True})
+
     @app.post("/api/events/<event_id>/feedback")
     @require_auth
     def event_feedback(event_id: str):

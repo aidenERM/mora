@@ -72,6 +72,23 @@ def test_change_password_replaces_old_password(tmp_path):
     assert client.post("/api/auth/login", json={"password": "new-short-password"}).status_code == 200
 
 
+def test_message_reply_draft_is_review_only_and_falls_back_safely(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    login(client)
+    database = tmp_path / "pulse.sqlite3"
+    conn = connect(database)
+    event, _ = upsert_event(conn, _decision_event("mail-draft", topic="security", score=90))
+    conn.execute("UPDATE events SET metadata=? WHERE id=?", (json.dumps({"sender": "alerts@example.test", "gmail_message_id": "gmail-1"}), event["id"]))
+    conn.commit()
+    monkeypatch.setattr("pulse_app.app.classify_or_fallback", lambda *args, **kwargs: (None, {"safe_to_continue": True}))
+    result = client.post("/api/events/mail-draft/draft-reply", json={})
+    assert result.status_code == 200
+    assert result.json["needs_review"] is True
+    assert "send" not in result.json
+    assert result.json["generated_by"] == "deterministic fallback"
+    assert client.post("/api/events/mail-draft/draft-reply", json={}).json["metadata"]["ai_failed"] is True
+
+
 def test_subscription_validation_and_preferences(tmp_path):
     client = make_client(tmp_path)
     login(client)
