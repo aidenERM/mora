@@ -15,3 +15,5 @@ The companion should request permissions only for features Aiden enables:
 Pairing is a one-time code generated in Pulse Integrations. The app redeems it at `/api/companion/pair/redeem`, stores the returned bearer token in Keychain, and posts only normalized context to `/api/companion/context`. Do not put server credentials, OAuth client secrets, or the Shortcut token in the app.
 
 This folder is source-level integration guidance only. Building, signing, granting Apple permissions, and verifying background delivery require an Apple device/Xcode and remain HUMAN CHECK on this Windows workspace.
+
+Before device testing, add the matching usage descriptions and capabilities in the Xcode target: Calendar, Reminders, HealthKit, HomeKit, MusicKit, Contacts, Location, and App Intents only as each feature is enabled. The first proof should be pairing plus a battery/charging or context-mode upload; the remaining permissions can be enabled incrementally.

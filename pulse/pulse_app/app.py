@@ -12,7 +12,7 @@ from flask import Flask, jsonify, make_response, redirect, request, send_from_di
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .config import STATIC, TOPIC_LABELS, load_config
+from .config import PERSONAL_PRIORITY_CATEGORIES, STATIC, TOPIC_LABELS, load_config
 from .push import configured as push_configured, send_payload
 from .rules import annotate_candidate, apply_preference_adjustments, cluster_id_for, evaluate_notification, score_item, significant_tokens
 from .sources import github_webhook_candidate
@@ -46,7 +46,7 @@ from .storage import (
     upsert_event,
 )
 from .worker import _payload
-from .bedrock import classify_or_fallback
+from .bedrock import classify_or_fallback, validate_config
 from .integrations import (
     PROVIDERS,
     active_context,
@@ -59,8 +59,9 @@ from .integrations import (
     mark_success,
     provider_status,
     sync_provider,
+    normalize_companion_payload,
 )
-from .storage import companion_device, create_pairing_challenge, redeem_pairing_challenge, save_integration, set_context_signal
+from .storage import companion_device, create_pairing_challenge, list_companion_devices, redeem_pairing_challenge, save_integration, set_context_signal, update_companion_metadata
 
 LOGGER = logging.getLogger(__name__)
 
@@ -276,7 +277,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.get("/api/integrations")
     @require_auth
     def integrations_status():
-        return jsonify(integrations=provider_status(db(), config), context=active_context(db()))
+        return jsonify(integrations=provider_status(db(), config), context=active_context(db()), devices=list_companion_devices(db()))
 
     @app.post("/api/integrations/<provider>/disconnect")
     @require_auth
@@ -306,9 +307,12 @@ def create_app(test_config: dict | None = None) -> Flask:
         if provider not in PROVIDERS:
             return jsonify(error="unknown_integration"), 404
         if provider == "aws-bedrock":
+            validation = validate_config(config)
+            if not validation["valid"]:
+                return jsonify(ok=False, metadata={"success": False, "configuration": validation, "safe_to_continue": True}, integrations=provider_status(db(), config)), 503
             value, metadata = classify_or_fallback(config, "Return a minimal JSON health response.", {"service": "Pulse", "check": "connectivity"}, {"status": "string"})
             if not value:
-                mark_failure(db(), provider, metadata.get("error", "request_failed"))
+                mark_failure(db(), provider, metadata.get("error_code") or metadata.get("error", "request_failed"))
                 db().commit()
                 return jsonify(ok=False, metadata=metadata, integrations=provider_status(db(), config)), 502
             mark_success(db(), provider, {"model": metadata.get("model"), "latency_ms": metadata.get("latency_ms")})
@@ -371,24 +375,20 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.post("/api/companion/context")
     def companion_context():
         token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
-        if not token or not companion_device(db(), token):
+        device = companion_device(db(), token) if token else None
+        if not device:
             return jsonify(error="companion_auth_required"), 401
-        body = _json_body()
-        mode = str(body.get("mode", "unknown")).strip().lower()
-        if mode not in {"home", "school", "outside", "travel", "sleep", "unknown"}:
-            return jsonify(error="invalid_context_mode"), 400
-        confidence = body.get("confidence", 0.5)
         try:
-            confidence = max(0.0, min(1.0, float(confidence)))
-        except (TypeError, ValueError):
-            return jsonify(error="invalid_confidence"), 400
-        expires_at = body.get("expires_at")
-        set_context_signal(db(), "mode", {"mode": mode}, "apple-companion", confidence, str(expires_at)[:40] if expires_at else None)
-        save_integration(db(), "apple", "Apple companion", enabled=True, connection_state="connected", authorization_state="authorized", last_success_at=_now().isoformat(), last_attempted_at=_now().isoformat(), last_error="", metadata={"last_context_mode": mode})
-        for kind, value in (body.get("signals") or {}).items() if isinstance(body.get("signals"), dict) else []:
-            if kind not in {"device", "calendar", "location_mode", "weather"} or not isinstance(value, dict):
-                continue
-            set_context_signal(db(), kind, value, "apple-companion", confidence, str(expires_at)[:40] if expires_at else None)
+            payload = normalize_companion_payload(_json_body())
+        except (TypeError, ValueError) as exc:
+            return jsonify(error=str(exc)), 400
+        set_context_signal(db(), "mode", {"mode": payload["mode"]}, "apple-companion", payload["confidence"], payload["expires_at"])
+        for kind, value in payload["signals"].items():
+            set_context_signal(db(), kind, value, "apple-companion", payload["confidence"], payload["expires_at"])
+        previous = json.loads(device["metadata"] or "{}") if device["metadata"] else {}
+        previous.update({"permissions": payload["permissions"], "last_payload_at": _now().isoformat(), "last_mode": payload["mode"]})
+        update_companion_metadata(db(), device["id"], previous)
+        save_integration(db(), "apple", "Apple companion", enabled=True, connection_state="connected", authorization_state="authorized", last_success_at=_now().isoformat(), last_attempted_at=_now().isoformat(), last_error="", metadata={"last_context_mode": payload["mode"], "permissions": payload["permissions"]})
         db().commit()
         return jsonify(ok=True, context=active_context(db()))
 
@@ -402,7 +402,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify(error="invalid_priorities"), 400
         cleaned = {}
         for topic, value in priorities.items():
-            if topic not in TOPIC_LABELS:
+            if topic not in TOPIC_LABELS and topic not in PERSONAL_PRIORITY_CATEGORIES:
                 continue
             try:
                 cleaned[topic] = max(-20, min(20, int(value)))
@@ -702,15 +702,13 @@ def create_app(test_config: dict | None = None) -> Flask:
     def shortcut_context():
         if not config["SHORTCUT_TOKEN"] or request.headers.get("X-Pulse-Shortcut-Token") != config["SHORTCUT_TOKEN"]:
             return jsonify(error="shortcut_not_configured"), 403
-        body = _json_body()
-        mode = str(body.get("mode", "unknown")).strip().lower()
-        if mode not in {"home", "school", "outside", "travel", "sleep", "unknown"}:
-            return jsonify(error="invalid_context_mode"), 400
         try:
-            confidence = max(0.0, min(1.0, float(body.get("confidence", 0.7))))
-        except (TypeError, ValueError):
-            return jsonify(error="invalid_confidence"), 400
-        set_context_signal(db(), "mode", {"mode": mode}, "shortcut", confidence, body.get("expires_at"))
+            payload = normalize_companion_payload(_json_body())
+        except (TypeError, ValueError) as exc:
+            return jsonify(error=str(exc)), 400
+        set_context_signal(db(), "mode", {"mode": payload["mode"]}, "shortcut", payload["confidence"], payload["expires_at"])
+        for kind, value in payload["signals"].items():
+            set_context_signal(db(), kind, value, "shortcut", payload["confidence"], payload["expires_at"])
         db().commit()
         return jsonify(ok=True, context=active_context(db()))
 

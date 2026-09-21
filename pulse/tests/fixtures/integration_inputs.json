@@ -1,0 +1,14 @@
+{
+  "package": {"id": "package-1", "snippet": "Your UPS package 1Z999AA10123456784 is out for delivery", "subject": "Out for delivery"},
+  "purchase": {"id": "purchase-1", "snippet": "Payment received for your order", "subject": "Order confirmation"},
+  "refund": {"id": "purchase-2", "snippet": "Your refund has been issued", "subject": "Refund complete"},
+  "school": {"id": "school-1", "snippet": "Assignment due Friday in your class", "subject": "Class assignment"},
+  "travel": {"id": "travel-1", "snippet": "Your flight reservation and boarding details", "subject": "Flight reservation"},
+  "apple_context": {"mode": "outside", "confidence": 0.92, "expires_at": "2099-01-01T00:00:00Z", "permissions": {"calendar": "granted", "battery": "granted"}, "signals": {"battery": {"level": "0.24", "charging": "false"}, "network": {"connected": "true"}}},
+  "sleep_context": {"mode": "sleep", "confidence": 0.98, "expires_at": "2099-01-01T00:00:00Z", "signals": {"sleep": {"active": "true"}, "focus": {"active": "true"}}},
+  "calendar": {"event_id": "calendar-1", "title": "Flight to Bogotá", "start": "2099-01-01T12:00:00Z", "end": "2099-01-01T14:00:00Z"},
+  "home": {"home": "away"},
+  "discord": {"event_id": "discord-1", "title": "Release notification", "topic": "github", "summary": "A selected project released a new version."},
+  "ai_success": {"status": "ok"},
+  "ai_failure": {"error": "InvalidSignatureException"}
+}

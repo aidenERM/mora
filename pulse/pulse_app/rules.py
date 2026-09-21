@@ -325,7 +325,9 @@ def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
     if source_weight:
         adjustment += max(-8, min(8, source_weight))
         reasons.append("source learning")
-    manual_weight = int((preferences.get("personal_priorities") or {}).get(candidate.get("topic"), 0))
+    aliases = {"warzone": {"gaming"}, "github": {"coding", "ultimate_macro"}, "package": {"packages"}, "purchase": {"purchases"}, "apple": {"music_media"}, "security": {"important_services"}}
+    priority_values = preferences.get("personal_priorities") or {}
+    manual_weight = sum(int(priority_values.get(key, 0)) for key in {candidate.get("topic"), *(aliases.get(candidate.get("topic"), set()))})
     manual_weight = max(-20, min(20, manual_weight))
     if manual_weight:
         adjustment += manual_weight
@@ -623,6 +625,36 @@ def _quiet_hours_details(event: dict, now: datetime, prefs: dict, config: dict, 
     }
 
 
+def _context_delivery_details(event: dict, now: datetime, config: dict, conn=None, tier: str = "normal", score: int = 0) -> dict:
+    details = {"active": False, "mode": None, "focus": False, "affected": False, "bypassed": False, "reason": "no sleep or focus context"}
+    if conn is None:
+        return details
+    rows = conn.execute("SELECT rowid,kind,value_json,source,confidence,observed_at FROM context_signals WHERE expires_at IS NULL OR expires_at>=? ORDER BY observed_at DESC,rowid DESC", (now.replace(microsecond=0).isoformat(),)).fetchall()
+    mode = None
+    focus = False
+    for row in rows:
+        try:
+            value = json.loads(row["value_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            value = {}
+        if row["kind"] == "mode" and mode is None:
+            mode = value.get("mode")
+        if row["kind"] in {"sleep", "focus"} and str(value.get("active", value.get("enabled", ""))).casefold() in {"1", "true", "yes", "on"}:
+            focus = focus or row["kind"] == "focus"
+            if row["kind"] == "sleep" and mode is None:
+                mode = "sleep"
+    if mode != "sleep" and not focus:
+        return details
+    details.update({"active": True, "mode": mode, "focus": focus})
+    urgent = tier == "urgent" or (event.get("priority") == "critical" and score >= 90)
+    time_sensitive = bool((event.get("metadata") or {}).get("time_sensitive") or (event.get("metadata") or {}).get("safety_critical"))
+    bypassed = urgent or (tier == "high" and time_sensitive and score >= 95)
+    details["bypassed"] = bypassed
+    details["affected"] = not bypassed
+    details["reason"] = "critical safety delivery" if urgent else "time-sensitive delivery" if bypassed else "sleep context" if mode == "sleep" else "focus context"
+    return details
+
+
 def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None, config: dict | None = None, conn=None) -> tuple[bool, str, dict]:
     config = config or {
         "STRICT_MIN_THRESHOLDS": STRICT_MIN_THRESHOLDS,
@@ -660,6 +692,7 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
     tier_event = {**event, "score": score_after_trend}
     tier = notification_tier(tier_event, config)
     quiet = _quiet_hours_details(event, now, prefs, config, tier, effective_score)
+    context_delivery = _context_delivery_details(event, now, config, conn, tier, effective_score)
     frequency = _rolling_frequency_details(tier_event, now, config, conn, tier)
     trace = {
         "evaluated_at": now.replace(microsecond=0).isoformat(),
@@ -688,6 +721,7 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
         "rolling_frequency": frequency,
         "topic_cooling": cooling,
         "quiet_hours": quiet,
+        "context_delivery": context_delivery,
         "trend": trend,
         "pushed": bool(event.get("notification_count", 0)),
         "safety_critical": _safety_critical(event, config),
@@ -706,6 +740,8 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
         return False, "stale event", trace
     if quiet["affected"]:
         return False, "quiet hours", trace
+    if context_delivery["affected"]:
+        return False, context_delivery["reason"], trace
     if cooldown["active"]:
         if _meaningful_development(event, base_threshold, effective_score, config):
             cooldown["overridden_for_development"] = True

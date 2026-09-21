@@ -8,6 +8,7 @@ const state = {
   audit: null,
   integrations: [],
   context: [],
+  devices: [],
   subscription: false,
   detail: null,
   serviceWorkerRegistration: null,
@@ -141,6 +142,7 @@ async function loadAuthenticatedState() {
   state.audit = audit;
   state.integrations = integrations.integrations || [];
   state.context = integrations.context || [];
+  state.devices = integrations.devices || [];
   await checkSubscription();
 }
 
@@ -247,16 +249,21 @@ function integrationsCard() {
 
 function renderIntegrations() {
   document.title = "Pulse · integrations";
-  const cards = (state.integrations || []).map((item) => {
-    const provider = item.provider;
-    const connect = provider === "google" ? `<a class="button secondary" href="/api/integrations/google/connect">connect Google</a>` : provider === "discord" ? `<a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a>` : "";
-    const test = provider === "apple" ? `<button class="button secondary" data-action="pair-companion">pair iPhone</button>` : `<button class="button secondary" data-action="integration-test" data-provider="${escapeHtml(provider)}">test</button>`;
-    const sync = ["google", "gmail", "calendar", "discord"].includes(provider) ? `<button class="button ghost-button" data-action="integration-sync" data-provider="${escapeHtml(provider)}">sync now</button>` : "";
-    const disconnect = item.has_credentials && ["google", "discord"].includes(provider) ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="${escapeHtml(provider)}">disconnect</button>` : "";
-    const status = item.connection_state === "connected" ? "connected" : item.connection_state === "error" ? "needs attention" : item.configured ? "ready to connect" : "not configured";
-    const description = provider === "apple" ? "Native iPhone companion for Calendar, Reminders, derived context, location modes, HomeKit/MusicKit signals, and Shortcuts." : provider === "aws-bedrock" ? `Server-side structured AI using ${state.config?.bedrock_model_id || "openai.gpt-5.6-luna"}.` : provider === "discord" ? "Official OAuth only. Pulse never uses user tokens or scrapes messages." : "Read-only Gmail and Calendar access with minimal metadata storage.";
-    return `<section class="rules-card"><div class="rules-body"><div class="eyebrow">integration</div><div class="diagnostic-row"><span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(status)}${item.last_error ? " · " + escapeHtml(item.last_error) : ""}</small></span><span class="status-dot ${item.connection_state === "connected" ? "active" : "muted-dot"}"></span></div><p class="field-note">${escapeHtml(description)}</p><div class="feedback-row">${connect}${test}${sync}${disconnect}</div></div></section>`;
-  }).join("");
+  const item = (provider) => (state.integrations || []).find((entry) => entry.provider === provider) || { provider, label: provider, metadata: {} };
+  const status = (entry) => entry.connection_state === "connected" ? "connected" : entry.connection_state === "error" ? "needs attention" : entry.configured ? "needs setup" : "not configured";
+  const header = (entry, label) => `<div class="diagnostic-row"><span><strong>${escapeHtml(label || entry.label)}</strong><small>${escapeHtml(status(entry))}${entry.last_error ? " · " + escapeHtml(entry.last_error) : ""}</small></span><span class="status-dot ${entry.connection_state === "connected" ? "active" : "muted-dot"}></span></div>`;
+  const apple = item("apple");
+  const google = item("google");
+  const gmail = item("gmail");
+  const calendar = item("calendar");
+  const discord = item("discord");
+  const aws = item("aws-bedrock");
+  const appleFeatures = ["Companion", "Calendar", "Reminders", "Health", "Home", "Music", "Contacts", "Weather", "Location", "Shortcuts"].map((label) => `<span class="confidence ${apple.metadata?.permissions?.[label.toLowerCase()] === "granted" ? "confidence-confirmed" : ""}">${escapeHtml(label)} · ${apple.metadata?.permissions?.[label.toLowerCase()] || "setup"}</span>`).join(" · ");
+  const devices = (state.devices || []).map((device) => `<div class="diagnostic-row"><span>${escapeHtml(device.label)}<small>${device.last_seen_at ? "last sync " + escapeHtml(formatDate(device.last_seen_at)) : "never synced"}</small></span><strong>${device.active ? "active" : "revoked"}</strong></div>`).join("") || `<p class="fine-print">no iPhone companion paired</p>`;
+  const cards = `<section class="rules-card"><div class="rules-body"><div class="eyebrow">apple companion</div>${header(apple, "Apple")}</div><div class="rules-body"><p class="field-note">Derived context only. Raw health, contacts, location, and home data stay on the device.</p><p class="fine-print">${appleFeatures}</p>${devices}<div class="feedback-row"><button class="button secondary" data-action="pair-companion">pair iPhone</button><button class="button ghost-button" data-action="integration-test" data-provider="apple">test backend</button></div></div></section>`
+    + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">google</div>${header(google, "Google account")}<p class="field-note">Read-only Gmail and Calendar. Gmail: ${escapeHtml(status(gmail))}. Calendar: ${escapeHtml(status(calendar))}.</p><div class="feedback-row"><a class="button secondary" href="/api/integrations/google/connect">connect Google</a><button class="button ghost-button" data-action="integration-sync" data-provider="google">sync now</button>${google.has_credentials ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="google">disconnect</button>` : ""}</div></div></section>`
+    + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">discord</div>${header(discord, "Discord")}<p class="field-note">Official OAuth only: identity and selected server context, never generic chat history.</p><div class="feedback-row"><a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a><button class="button ghost-button" data-action="integration-test" data-provider="discord">test</button>${discord.has_credentials ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="discord">disconnect</button>` : ""}</div></div></section>`
+    + `<section class="rules-card"><div class="rules-body"><div class="eyebrow">aws ai</div>${header(aws, "AWS Bedrock")}<p class="field-note">region: ${escapeHtml(aws.metadata?.region || "us-east-1")} · model: ${escapeHtml(aws.metadata?.model || state.config?.bedrock_model_id || "openai.gpt-5.6-luna")} · credentials: ${aws.metadata?.credentials_present ? "present" : "missing"}</p><p class="fine-print">AI is optional. Deterministic scoring continues when Bedrock is unavailable.</p><button class="button secondary" data-action="integration-test" data-provider="aws-bedrock">test AI</button></div></section>`;
   const contextRows = (state.context || []).map((item) => `<div class="diagnostic-row"><span>${escapeHtml(item.kind)}<small>${escapeHtml(item.source)}</small></span><strong>${escapeHtml(JSON.stringify(item.value))}</strong></div>`).join("") || `<p class="fine-print">no companion context has been received</p>`;
   app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect only the context Pulse can use to make a better decision. credentials stay server-side.</p>${cards}<section class="quality-card diagnostics"><span class="eyebrow">active context</span>${contextRows}</section><a class="button ghost-button full" href="/">back to history</a>`;
 }

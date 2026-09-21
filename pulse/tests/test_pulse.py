@@ -14,8 +14,8 @@ from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.integrations import classify_gmail_message, create_oauth_state, consume_oauth_state
-from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, upsert_event, upsert_package, upsert_purchase
+from pulse_app.integrations import classify_gmail_message, consume_oauth_state, create_oauth_state, normalize_companion_payload, prepare_event_candidate
+from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -85,9 +85,10 @@ def test_integrations_status_pairing_and_context(tmp_path):
     assert challenge.status_code == 200
     redeemed = client.post("/api/companion/pair/redeem", json={"code": challenge.json["code"], "label": "test iPhone"})
     assert redeemed.status_code == 200
-    context = client.post("/api/companion/context", json={"mode": "outside", "confidence": 0.9}, headers={"Authorization": "Bearer " + redeemed.json["token"]})
+    context = client.post("/api/companion/context", json={"mode": "outside", "confidence": 0.9, "permissions": {"calendar": "granted"}, "signals": {"battery": {"level": "0.4", "charging": "false"}}}, headers={"Authorization": "Bearer " + redeemed.json["token"]})
     assert context.status_code == 200
-    assert context.json["context"][0]["value"]["mode"] == "outside"
+    assert next(item for item in context.json["context"] if item["kind"] == "mode")["value"]["mode"] == "outside"
+    assert client.get("/api/integrations").json["devices"][0]["metadata"]["permissions"]["calendar"] == "granted"
     assert client.post("/api/companion/context", json={"mode": "home"}, headers={"Authorization": "Bearer bad"}).status_code == 401
 
 
@@ -125,9 +126,75 @@ def test_bedrock_structured_validation(monkeypatch):
             return {"output": {"message": {"content": [{"text": '{"status":"ok"}'}]}}, "usage": {"inputTokens": 2, "outputTokens": 3}, "stopReason": "end_turn"}
 
     monkeypatch.setattr(bedrock, "_client", lambda _config: FakeClient())
-    value, metadata = bedrock.invoke_json({"AWS_REGION": "us-east-1", "BEDROCK_MODEL_ID": "openai.gpt-5.6-luna"}, "health", {}, {"status": "string"})
+    bedrock._CACHE.clear()
+    value, metadata = bedrock.invoke_json({"AWS_REGION": "us-east-1", "BEDROCK_MODEL_ID": "openai.gpt-5.6-luna", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test"}, "health", {}, {"status": "string"})
     assert value == {"status": "ok"}
     assert metadata["output_tokens"] == 3
+    _, cached = bedrock.invoke_json({"AWS_REGION": "us-east-1", "BEDROCK_MODEL_ID": "openai.gpt-5.6-luna", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test"}, "health", {}, {"status": "string"})
+    assert cached["cached"] is True
+
+
+def test_fixture_inputs_use_existing_normalizers():
+    fixtures = json.loads((Path(__file__).parent / "fixtures" / "integration_inputs.json").read_text(encoding="utf-8"))
+    def message(item):
+        return {"id": item["id"], "snippet": item["snippet"], "payload": {"headers": [{"name": "Subject", "value": item["subject"]}, {"name": "From", "value": "fixture@example.test"}]}}
+    assert classify_gmail_message(message(fixtures["package"]))["topic"] == "package"
+    assert classify_gmail_message(message(fixtures["purchase"]))["topic"] == "purchase"
+    assert classify_gmail_message(message(fixtures["school"]))["topic"] == "school"
+    assert classify_gmail_message(message(fixtures["travel"]))["topic"] == "travel"
+    assert normalize_companion_payload(fixtures["apple_context"])["signals"]["battery"]["charging"] == "false"
+
+
+def test_bedrock_failure_is_safe_and_config_is_explicit(monkeypatch):
+    from pulse_app import bedrock
+    monkeypatch.setattr(bedrock, "invoke_json", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    value, metadata = bedrock.classify_or_fallback({"BEDROCK_MODEL_ID": "openai.gpt-5.6-luna", "AWS_REGION": "us-east-1", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test"}, "health", {}, {"status": "string"})
+    assert value is None and metadata["safe_to_continue"] and metadata["fallback"] == "deterministic"
+
+
+def test_context_normalization_precedence_and_expiry(tmp_path):
+    payload = normalize_companion_payload({"mode": "outside", "confidence": 0.9, "permissions": {"calendar": "granted"}, "signals": {"battery": {"level": "0.4"}}})
+    assert payload["mode"] == "outside" and payload["permissions"]["calendar"] == "granted"
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    set_context_signal(conn, "mode", {"mode": "sleep"}, "apple-companion", 0.98, "2099-01-01T00:00:00+00:00")
+    set_context_signal(conn, "mode", {"mode": "outside"}, "apple-companion", 0.98, "2099-01-01T00:00:00+00:00")
+    from pulse_app.integrations import active_context
+    assert active_context(conn)[0]["value"]["mode"] == "outside"
+    set_context_signal(conn, "battery", {"level": "0.1"}, "shortcut", 0.5, "2000-01-01T00:00:00+00:00")
+    assert all(item["kind"] != "battery" for item in active_context(conn))
+
+
+def test_package_and_purchase_state_merges_and_suppresses_duplicates(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    first = upsert_package_record(conn, "1Z 999-AA10123456784", "UPS", carrier="ups", status="in transit")
+    duplicate = upsert_package_record(conn, "1Z999AA10123456784", "another sender", carrier="UPS", status="in transit")
+    changed = upsert_package_record(conn, "1Z999AA10123456784", "UPS", status="delayed")
+    assert first["id"] == duplicate["id"] == changed["id"]
+    assert duplicate["changed"] is False and changed["changed"] is True and len(changed["history"]) == 2
+    purchase = upsert_purchase_record(conn, "message-1", merchant="store", title="Phone", order_id="ORDER-1", lifecycle="ordered")
+    merged = upsert_purchase_record(conn, "message-2", merchant="store", title="Phone", order_id="ORDER-1", lifecycle="shipped", package_id=first["id"])
+    assert purchase["id"] == merged["id"] and merged["changed"] is True
+
+
+def test_event_preparation_and_sleep_aware_delivery(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    candidate = {"topic": "weather", "score": 80, "priority": "high", "metadata": {"score_components": {}}}
+    prepare_event_candidate(candidate, [{"kind": "mode", "value": {"mode": "outside"}}])
+    assert candidate["score"] == 88 and candidate["metadata"]["score_components"]["context_preparation"] == 8
+    set_context_signal(conn, "mode", {"mode": "sleep"}, "apple-companion", 0.99, "2099-01-01T00:00:00+00:00")
+    event, _ = upsert_event(conn, _decision_event("sleep-held", topic="warzone", score=88))
+    config = load_config({"DATABASE_PATH": str(database), "ROLLING_NOTIFICATION_LIMITS": {}, "NOTIFICATION_COOLDOWNS": {"warzone": 0}})
+    allowed, reason, trace = evaluate_notification(event, get_preferences(conn, config), datetime(2026, 9, 20, 12, tzinfo=timezone.utc), config, conn)
+    assert not allowed and reason == "sleep context" and trace["context_delivery"]["affected"]
+    set_context_signal(conn, "mode", {"mode": "outside"}, "apple-companion", 0.99, "2099-01-01T00:00:00+00:00")
+    allowed, _, _ = evaluate_notification(event, get_preferences(conn, config), datetime(2026, 9, 20, 12, tzinfo=timezone.utc), config, conn)
+    assert allowed
 
 
 def test_relevance_and_quiet_hours():

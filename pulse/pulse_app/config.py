@@ -25,6 +25,8 @@ DEFAULT_THRESHOLDS = {
     "system": 0,
 }
 
+PERSONAL_PRIORITY_CATEGORIES = {"apple", "warzone", "gaming", "coding", "ultimate_macro", "packages", "purchases", "weather", "school", "security", "travel", "important_services", "music_media"}
+
 # These floors keep an accidentally permissive stored preference or old .env
 # value from turning Pulse back into an RSS-to-push relay.
 STRICT_MIN_THRESHOLDS = {
@@ -253,6 +255,7 @@ def load_config(test_config: dict | None = None) -> dict:
         "AWS_SECRET_ACCESS_KEY": os.environ.get("PULSE_AWS_SECRET_ACCESS_KEY", ""),
         "BEDROCK_MODEL_ID": os.environ.get("PULSE_BEDROCK_MODEL_ID", "openai.gpt-5.6-luna"),
         "BEDROCK_FALLBACK_MODEL_ID": os.environ.get("PULSE_BEDROCK_FALLBACK_MODEL_ID", ""),
+        "BEDROCK_CACHE_TTL_SECONDS": max(0, min(3600, int(os.environ.get("PULSE_BEDROCK_CACHE_TTL_SECONDS", "300")))),
         "GOOGLE_CLIENT_ID": os.environ.get("PULSE_GOOGLE_CLIENT_ID", ""),
         "GOOGLE_CLIENT_SECRET": os.environ.get("PULSE_GOOGLE_CLIENT_SECRET", ""),
         "GOOGLE_REDIRECT_URI": os.environ.get("PULSE_GOOGLE_REDIRECT_URI", "https://pulse.moralife.uk/api/integrations/google/callback"),

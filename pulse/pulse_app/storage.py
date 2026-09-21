@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -14,7 +15,7 @@ try:
 except ImportError:  # pragma: no cover - optional until integrations are enabled
     Fernet = None
 
-from .config import DEFAULT_SEARCH_PROFILES, DEFAULT_THRESHOLDS, DEFAULT_TRACKED_ENTITIES
+from .config import DEFAULT_SEARCH_PROFILES, DEFAULT_THRESHOLDS, DEFAULT_TRACKED_ENTITIES, PERSONAL_PRIORITY_CATEGORIES
 from .rules import cluster_id_for, clean_event_summary, clean_event_title, event_fingerprint, events_similar, materially_changed, normalize
 
 SCHEMA = """
@@ -112,7 +113,8 @@ CREATE TABLE IF NOT EXISTS companion_devices (
     token_hash TEXT UNIQUE NOT NULL,
     created_at TEXT NOT NULL,
     last_seen_at TEXT,
-    revoked_at TEXT
+    revoked_at TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS pairing_challenges (
     id TEXT PRIMARY KEY,
@@ -323,7 +325,7 @@ def redeem_pairing_challenge(conn: sqlite3.Connection, code: str, label: str) ->
     token = secrets.token_urlsafe(32)
     device_id = secrets.token_urlsafe(12)
     conn.execute("UPDATE pairing_challenges SET used_at=? WHERE id=?", (utc_now(), row["id"]))
-    conn.execute("INSERT INTO companion_devices(id,label,token_hash,created_at) VALUES(?,?,?,?)", (device_id, label[:120] or "Pulse companion", hashlib.sha256(token.encode()).hexdigest(), utc_now()))
+    conn.execute("INSERT INTO companion_devices(id,label,token_hash,created_at,metadata) VALUES(?,?,?,?,?)", (device_id, label[:120] or "Pulse companion", hashlib.sha256(token.encode()).hexdigest(), utc_now(), "{}"))
     conn.commit()
     return device_id, token
 
@@ -336,52 +338,97 @@ def companion_device(conn: sqlite3.Connection, token: str):
     return row
 
 
-def upsert_package(conn: sqlite3.Connection, tracking_number: str, merchant: str = "", **fields) -> str:
-    tracking_number = str(tracking_number).strip()[:120]
+def list_companion_devices(conn: sqlite3.Connection) -> list[dict]:
+    result = []
+    for row in conn.execute("SELECT id,label,created_at,last_seen_at,revoked_at,metadata FROM companion_devices ORDER BY created_at DESC").fetchall():
+        item = dict(row)
+        item["metadata"] = _safe_json(item.get("metadata"), {})
+        item["active"] = item.get("revoked_at") is None
+        result.append(item)
+    return result
+
+
+def update_companion_metadata(conn: sqlite3.Connection, device_id: str, metadata: dict) -> None:
+    conn.execute("UPDATE companion_devices SET metadata=? WHERE id=? AND revoked_at IS NULL", (json.dumps(metadata if isinstance(metadata, dict) else {}, separators=(",", ":")), device_id))
+
+
+PACKAGE_STATUSES = {"unknown", "ordered", "in_transit", "delayed", "customs", "out_for_delivery", "delivered", "failed_delivery", "delivery_exception"}
+
+
+def normalize_tracking_number(value: str) -> str:
+    return "".join(char for char in str(value or "").upper() if char.isalnum())[:120]
+
+
+def normalize_carrier(value: str) -> str:
+    text = "".join(char for char in str(value or "").casefold() if char.isalnum())
+    return {"ups": "UPS", "fedex": "FedEx", "dhl": "DHL", "usps": "USPS", "amazon": "Amazon", "servientrega": "Servientrega", "coordinadora": "Coordinadora"}.get(text, str(value or "").strip()[:80])
+
+
+def upsert_package_record(conn: sqlite3.Connection, tracking_number: str, merchant: str = "", **fields) -> dict:
+    tracking_number = normalize_tracking_number(tracking_number)
     merchant = str(merchant).strip()[:160]
     if not tracking_number:
         raise ValueError("tracking number is required")
-    existing = conn.execute("SELECT * FROM packages WHERE tracking_number=? AND merchant=?", (tracking_number, merchant)).fetchone()
+    existing = conn.execute("SELECT * FROM packages WHERE tracking_number=? ORDER BY updated_at DESC LIMIT 1", (tracking_number,)).fetchone()
     package_id = existing["id"] if existing else "pkg-" + hashlib.sha256((tracking_number + ":" + merchant).encode()).hexdigest()[:24]
-    status = str(fields.get("status", existing["status"] if existing else "unknown"))[:40]
+    status = str(fields.get("status", existing["status"] if existing else "unknown")).strip().casefold().replace(" ", "_")
+    status = {"outfordelivery": "out_for_delivery", "failed": "failed_delivery", "exception": "delivery_exception"}.get(status, status)
+    if status not in PACKAGE_STATUSES:
+        status = "unknown"
     history = _safe_json(existing["status_history"], []) if existing else []
     if not isinstance(history, list):
         history = []
     if not history or history[-1].get("status") != status:
         history.append({"status": status, "at": utc_now()})
-    conn.execute(
-        """INSERT INTO packages(id,tracking_number,carrier,merchant,order_id,estimated_delivery,status,status_history,source,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(tracking_number,merchant) DO UPDATE SET carrier=excluded.carrier,order_id=excluded.order_id,
-             estimated_delivery=excluded.estimated_delivery,status=excluded.status,status_history=excluded.status_history,
-             source=excluded.source,updated_at=excluded.updated_at""",
-        (package_id, tracking_number, str(fields.get("carrier", existing["carrier"] if existing else ""))[:80], merchant,
-         str(fields.get("order_id", existing["order_id"] if existing else ""))[:120], fields.get("estimated_delivery", existing["estimated_delivery"] if existing else None),
-         status, json.dumps(history[-20:], separators=(",", ":")), str(fields.get("source", existing["source"] if existing else ""))[:120], utc_now()),
-    )
-    return package_id
+    changed = not existing or existing["status"] != status
+    values = (normalize_carrier(fields.get("carrier", existing["carrier"] if existing else "")), existing["merchant"] if existing else merchant,
+        str(fields.get("order_id", existing["order_id"] if existing else ""))[:120], fields.get("estimated_delivery", existing["estimated_delivery"] if existing else None),
+        status, json.dumps(history[-20:], separators=(",", ":")), str(fields.get("source", existing["source"] if existing else ""))[:120], utc_now())
+    if existing:
+        conn.execute("UPDATE packages SET carrier=?,merchant=?,order_id=?,estimated_delivery=?,status=?,status_history=?,source=?,updated_at=? WHERE id=?", (*values, package_id))
+    else:
+        conn.execute("INSERT INTO packages(id,tracking_number,carrier,merchant,order_id,estimated_delivery,status,status_history,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (package_id, tracking_number, values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]))
+    return {"id": package_id, "tracking_number": tracking_number, "status": status, "changed": changed, "history": history[-20:]}
 
 
-def upsert_purchase(conn: sqlite3.Connection, external_key: str, **fields) -> str:
+def upsert_package(conn: sqlite3.Connection, tracking_number: str, merchant: str = "", **fields) -> str:
+    return upsert_package_record(conn, tracking_number, merchant, **fields)["id"]
+
+
+PURCHASE_LIFECYCLES = {"interested", "planned", "ordered", "paid", "shipped", "delayed", "delivered", "cancelled", "returned", "refunded"}
+
+
+def upsert_purchase_record(conn: sqlite3.Connection, external_key: str, **fields) -> dict:
     external_key = str(external_key).strip()[:240]
     if not external_key:
         raise ValueError("purchase key is required")
+    order_id = str(fields.get("order_id", "")).strip()[:120]
     existing = conn.execute("SELECT * FROM purchases WHERE external_key=?", (external_key,)).fetchone()
+    if not existing and order_id:
+        existing = conn.execute("SELECT * FROM purchases WHERE order_id=? ORDER BY updated_at DESC LIMIT 1", (order_id,)).fetchone()
+    if not existing and fields.get("merchant") and fields.get("title"):
+        existing = conn.execute("SELECT * FROM purchases WHERE merchant=? AND title=? ORDER BY updated_at DESC LIMIT 1", (str(fields["merchant"])[:160], str(fields["title"])[:240])).fetchone()
     purchase_id = existing["id"] if existing else "purchase-" + hashlib.sha256(external_key.encode()).hexdigest()[:24]
     metadata = fields.get("metadata", _safe_json(existing["metadata"], {}) if existing else {})
-    conn.execute(
-        """INSERT INTO purchases(id,external_key,merchant,title,amount,currency,lifecycle,order_id,package_id,metadata,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(external_key) DO UPDATE SET merchant=excluded.merchant,title=excluded.title,amount=excluded.amount,
-             currency=excluded.currency,lifecycle=excluded.lifecycle,order_id=excluded.order_id,package_id=excluded.package_id,
-             metadata=excluded.metadata,updated_at=excluded.updated_at""",
-        (purchase_id, external_key, str(fields.get("merchant", existing["merchant"] if existing else ""))[:160],
-         str(fields.get("title", existing["title"] if existing else ""))[:240], fields.get("amount", existing["amount"] if existing else None),
-         str(fields.get("currency", existing["currency"] if existing else ""))[:12], str(fields.get("lifecycle", existing["lifecycle"] if existing else "interested"))[:40],
-         str(fields.get("order_id", existing["order_id"] if existing else ""))[:120], fields.get("package_id", existing["package_id"] if existing else None),
-         json.dumps(metadata if isinstance(metadata, dict) else {}, separators=(",", ":")), utc_now()),
-    )
-    return purchase_id
+    lifecycle = str(fields.get("lifecycle", existing["lifecycle"] if existing else "interested")).strip().casefold().replace(" ", "_")
+    lifecycle = {"canceled": "cancelled", "return": "returned", "refund": "refunded"}.get(lifecycle, lifecycle)
+    if lifecycle not in PURCHASE_LIFECYCLES:
+        lifecycle = "interested"
+    changed = not existing or existing["lifecycle"] != lifecycle
+    values = (str(fields.get("merchant", existing["merchant"] if existing else ""))[:160],
+        str(fields.get("title", existing["title"] if existing else ""))[:240], fields.get("amount", existing["amount"] if existing else None),
+        str(fields.get("currency", existing["currency"] if existing else ""))[:12], lifecycle,
+        order_id or (existing["order_id"] if existing else ""), fields.get("package_id", existing["package_id"] if existing else None),
+        json.dumps(metadata if isinstance(metadata, dict) else {}, separators=(",", ":")), utc_now())
+    if existing:
+        conn.execute("UPDATE purchases SET merchant=?,title=?,amount=?,currency=?,lifecycle=?,order_id=?,package_id=?,metadata=?,updated_at=? WHERE id=?", (*values, purchase_id))
+    else:
+        conn.execute("INSERT INTO purchases(id,external_key,merchant,title,amount,currency,lifecycle,order_id,package_id,metadata,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (purchase_id, external_key, *values))
+    return {"id": purchase_id, "external_key": external_key, "lifecycle": lifecycle, "changed": changed}
+
+
+def upsert_purchase(conn: sqlite3.Connection, external_key: str, **fields) -> str:
+    return upsert_purchase_record(conn, external_key, **fields)["id"]
 
 
 def init_db(path: str | Path, initial_password_hash: str = "") -> None:
@@ -426,6 +473,9 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
         for name, definition in decision_migrations.items():
             if name not in decision_columns:
                 conn.execute(f"ALTER TABLE event_decisions ADD COLUMN {name} {definition}")
+        companion_columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_devices)").fetchall()}
+        if "metadata" not in companion_columns:
+            conn.execute("ALTER TABLE companion_devices ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
         for row in conn.execute("SELECT * FROM events WHERE canonical_event_id='' OR content_hash='' OR (notified_at IS NOT NULL AND notification_count=0)").fetchall():
             item = event_from_row(row)
             fingerprint = event_fingerprint(item)
@@ -455,7 +505,7 @@ def default_preferences(config: dict) -> dict:
         "quiet_bypass_priority": config["QUIET_BYPASS_PRIORITY"],
         "topic_thresholds": {**DEFAULT_THRESHOLDS, **config["TOPIC_THRESHOLDS"]},
         "muted_topics": {},
-        "personal_priorities": {},
+        "personal_priorities": {key: 0 for key in PERSONAL_PRIORITY_CATEGORIES},
         "temporary_priority": {},
     }
 
@@ -502,22 +552,22 @@ def passive_source_weights(conn: sqlite3.Connection) -> dict:
 def feedback_weights(conn: sqlite3.Connection, field: str) -> dict:
     if field not in {"topic", "source_id"}:
         return {}
-    rows = conn.execute(
-        f"""SELECT events.{field} AS key,
-                  SUM(CASE WHEN event_actions.action='useful' THEN 1 ELSE 0 END) AS useful,
-                  SUM(CASE WHEN event_actions.action='not_useful' THEN 1 ELSE 0 END) AS not_useful,
-                  SUM(CASE WHEN event_actions.action='too_late' THEN 1 ELSE 0 END) AS too_late
-           FROM event_actions JOIN events ON events.id=event_actions.event_id
-           WHERE event_actions.action IN ('useful','not_useful','too_late')
-           GROUP BY events.{field}"""
-    ).fetchall()
-    weights = {}
+    rows = conn.execute(f"SELECT events.{field} AS key,event_actions.action,event_actions.created_at FROM event_actions JOIN events ON events.id=event_actions.event_id WHERE event_actions.action IN ('useful','not_useful','too_late')").fetchall()
+    values, totals = {}, {}
+    now = datetime.now(timezone.utc)
     for row in rows:
-        total = int(row["useful"] or 0) + int(row["not_useful"] or 0) + int(row["too_late"] or 0)
-        if total < 2:
-            continue
-        value = 3 * int(row["useful"] or 0) - 3 * int(row["not_useful"] or 0) - 2 * int(row["too_late"] or 0)
-        weights[row["key"]] = max(-8, min(8, value))
+        try:
+            created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age_days = max(0.0, (now - created).total_seconds() / 86400)
+        except (TypeError, ValueError):
+            age_days = 0.0
+        decay = max(0.25, math.exp(-age_days / 180.0))
+        weight = {"useful": 3, "not_useful": -3, "too_late": -2}[row["action"]]
+        values[row["key"]] = values.get(row["key"], 0.0) + weight * decay
+        totals[row["key"]] = totals.get(row["key"], 0) + 1
+    weights = {key: max(-8, min(8, round(value))) for key, value in values.items() if totals.get(key, 0) >= 2}
     return weights
 
 
@@ -533,7 +583,7 @@ def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     base.update({key: value for key, value in stored.items() if key in base})
     base["topic_thresholds"] = {**base["topic_thresholds"], **stored.get("topic_thresholds", {})}
     base["muted_topics"] = stored.get("muted_topics", {})
-    base["personal_priorities"] = stored.get("personal_priorities", {}) if isinstance(stored.get("personal_priorities", {}), dict) else {}
+    base["personal_priorities"] = {**base["personal_priorities"], **(stored.get("personal_priorities", {}) if isinstance(stored.get("personal_priorities", {}), dict) else {})}
     base["temporary_priority"] = stored.get("temporary_priority", {}) if isinstance(stored.get("temporary_priority", {}), dict) else {}
     for key in ("followed_entities", "less_like_entities", "less_like_topics"):
         base[key] = stored.get(key, {}) if isinstance(stored.get(key, {}), dict) else {}

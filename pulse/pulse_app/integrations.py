@@ -10,7 +10,8 @@ from urllib.parse import urlencode
 
 import requests
 
-from .rules import annotate_candidate, apply_preference_adjustments, score_item
+from .rules import annotate_candidate, apply_preference_adjustments, priority_for, score_item
+from .bedrock import validate_config
 from .storage import (
     connect,
     get_preferences,
@@ -22,7 +23,9 @@ from .storage import (
     save_source_state,
     set_context_signal,
     upsert_package,
+    upsert_package_record,
     upsert_purchase,
+    upsert_purchase_record,
     upsert_event,
 )
 
@@ -53,6 +56,63 @@ def _safe_json(value, fallback=None):
         return fallback if fallback is not None else {}
 
 
+CONTEXT_MODES = {"home", "school", "outside", "travel", "sleep", "unknown"}
+CONTEXT_KINDS = {"mode", "calendar", "reminders", "health", "home", "music", "contacts", "weather", "location", "battery", "charging", "network", "sleep", "focus", "shortcut"}
+CONTEXT_SOURCE_PRIORITY = {"apple-companion": 5, "trusted-inference": 4, "shortcut": 3, "google-calendar": 2, "manual": 1}
+
+
+def normalize_companion_payload(body: dict) -> dict:
+    body = body if isinstance(body, dict) else {}
+    mode = str(body.get("mode", "unknown")).strip().casefold()
+    if mode not in CONTEXT_MODES:
+        raise ValueError("invalid context mode")
+    try:
+        confidence = max(0.0, min(1.0, float(body.get("confidence", 0.5))))
+    except (TypeError, ValueError):
+        raise ValueError("invalid confidence")
+    expires_at = body.get("expires_at")
+    if expires_at:
+        parsed = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        expires_at = parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    signals = {}
+    raw_signals = body.get("signals") if isinstance(body.get("signals"), dict) else {}
+    for kind, value in raw_signals.items():
+        if kind in CONTEXT_KINDS and isinstance(value, dict):
+            # Only derived, bounded context crosses the companion boundary.
+            signals[kind] = {str(key)[:40]: str(item)[:160] for key, item in value.items() if key and item is not None}
+    permissions = body.get("permissions") if isinstance(body.get("permissions"), dict) else {}
+    permissions = {str(key)[:40]: str(value)[:40] for key, value in permissions.items() if key and value is not None}
+    return {"mode": mode, "confidence": confidence, "expires_at": expires_at, "signals": signals, "permissions": permissions}
+
+
+def prepare_event_candidate(candidate: dict, contexts: list[dict] | None = None) -> dict:
+    """Apply conservative context elevation to an already-normalized event."""
+    contexts = contexts or []
+    mode = next((item.get("value", {}).get("mode") for item in contexts if item.get("kind") == "mode"), None)
+    context_kinds = {item.get("kind") for item in contexts}
+    boost = 0
+    reason = ""
+    topic = candidate.get("topic")
+    if topic == "weather" and mode in {"outside", "travel"}:
+        boost, reason = 8, "weather affects current plans"
+    elif topic == "travel" and mode == "travel":
+        boost, reason = 10, "travel context"
+    elif topic in {"package", "purchase"} and "calendar" in context_kinds:
+        boost, reason = 5, "calendar-aware preparation"
+    elif topic in {"security", "school"} and mode == "school":
+        boost, reason = 5, "school context"
+    if (candidate.get("metadata") or {}).get("status_change"):
+        candidate.setdefault("metadata", {})["time_sensitive"] = True
+    if boost:
+        candidate["score"] = min(100, int(candidate.get("score", 0)) + boost)
+        candidate.setdefault("metadata", {}).setdefault("score_components", {})["context_preparation"] = boost
+        candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; " + reason
+        candidate["priority"] = priority_for(candidate["score"])
+    return candidate
+
+
 def provider_status(conn, config: dict) -> list[dict]:
     rows = {row["provider"]: dict(row) for row in conn.execute("SELECT * FROM integrations ORDER BY provider").fetchall()}
     result = []
@@ -73,7 +133,9 @@ def provider_status(conn, config: dict) -> list[dict]:
         elif provider == "discord":
             item["configured"] = bool(config.get("DISCORD_CLIENT_ID") and config.get("DISCORD_CLIENT_SECRET"))
         elif provider == "aws-bedrock":
-            item["configured"] = bool(config.get("BEDROCK_MODEL_ID"))
+            bedrock = validate_config(config)
+            item["configured"] = bool(bedrock["valid"])
+            item["metadata"].update({"region": bedrock["region"], "model": bedrock["model"], "credentials_present": bedrock["credentials_present"], "configuration_errors": bedrock["errors"]})
         else:
             item["configured"] = True
         result.append(item)
@@ -215,7 +277,7 @@ def classify_gmail_message(message: dict) -> dict:
     return {"relevant": True, "topic": topic, "keywords": keywords, "score": score, "subject": subject, "sender": sender, "snippet": snippet, "tracking_number": tracking, "message_id": message.get("id", "")}
 
 
-def _gmail_event(item: dict, config: dict, preferences: dict) -> dict:
+def _gmail_event(item: dict, config: dict, preferences: dict, contexts: list[dict] | None = None) -> dict:
     message_id = item["message_id"]
     title = item["subject"] or "Important Gmail message"
     summary = item["snippet"] or "Important message detected in Gmail."
@@ -224,29 +286,38 @@ def _gmail_event(item: dict, config: dict, preferences: dict) -> dict:
         "id": "gmail-" + hashlib.sha256(message_id.encode()).hexdigest()[:24], "source_id": "gmail", "source_kind": "gmail", "topic": item["topic"],
         "title": title, "summary": summary, "body": f"{reason}; sender: {item['sender']}", "url": "https://mail.google.com/mail/u/0/#all/" + message_id,
         "canonical_key": "gmail:" + message_id, "published_at": None, "score": max(score, item["score"]), "priority": "critical" if score >= 90 else "high", "relevant": relevant,
-        "metadata": {"source_trust": "primary", "gmail_message_id": message_id, "sender": item["sender"], "tracking_number": item.get("tracking_number", ""), "sources": [{"url": "https://mail.google.com", "title": "Gmail", "trust": "primary"}]},
+        "metadata": {"source_trust": "primary", "gmail_message_id": message_id, "sender": item["sender"], "tracking_number": item.get("tracking_number", ""), "lifecycle": item.get("lifecycle", {}), "sources": [{"url": "https://mail.google.com", "title": "Gmail", "trust": "primary"}]},
     }
     annotate_candidate(event, config.get("TRACKED_ENTITIES", []))
     apply_preference_adjustments(event, preferences)
+    prepare_event_candidate(event, contexts)
     return event
 
 
 def persist_gmail_lifecycle(conn, item: dict) -> None:
+    result = {}
     if item.get("topic") == "package" and item.get("tracking_number"):
         text = (item.get("subject", "") + " " + item.get("snippet", "")).casefold()
-        if "delivered" in text:
+        if "failed delivery" in text or "delivery failed" in text:
+            status = "failed_delivery"
+        elif "delivered" in text:
             status = "delivered"
         elif "out for delivery" in text:
             status = "out_for_delivery"
-        elif "exception" in text or "customs" in text:
-            status = "exception"
+        elif "customs" in text:
+            status = "customs"
+        elif "exception" in text:
+            status = "delivery_exception"
+        elif "delay" in text or "delayed" in text:
+            status = "delayed"
         else:
             status = "in_transit"
-        upsert_package(conn, item["tracking_number"], item.get("sender", ""), status=status, source="gmail")
+        result["package"] = upsert_package_record(conn, item["tracking_number"], item.get("sender", ""), status=status, source="gmail")
     if item.get("topic") == "purchase":
         text = (item.get("subject", "") + " " + item.get("snippet", "")).casefold()
-        lifecycle = "refunded" if "refund" in text or "return approved" in text else "cancelled" if "cancel" in text else "ordered"
-        upsert_purchase(conn, "gmail:" + item.get("message_id", ""), merchant=item.get("sender", ""), title=item.get("subject", ""), lifecycle=lifecycle, metadata={"source": "gmail"})
+        lifecycle = "refunded" if "refund" in text else "returned" if "return" in text else "cancelled" if "cancel" in text else "shipped" if "shipped" in text else "paid" if "payment" in text else "ordered"
+        result["purchase"] = upsert_purchase_record(conn, "gmail:" + item.get("message_id", ""), merchant=item.get("sender", ""), title=item.get("subject", ""), lifecycle=lifecycle, metadata={"source": "gmail"})
+    return result
 
 
 def sync_google(conn, config: dict) -> dict:
@@ -260,8 +331,8 @@ def sync_google(conn, config: dict) -> dict:
         classified = classify_gmail_message(message)
         if not classified.get("relevant"):
             continue
-        persist_gmail_lifecycle(conn, classified)
-        event = _gmail_event(classified, config, preferences)
+        classified["lifecycle"] = persist_gmail_lifecycle(conn, classified)
+        event = _gmail_event(classified, config, preferences, active_context(conn))
         stored, was_created = upsert_event(conn, event)
         created += int(was_created)
     calendar = _google_get(token, "https://www.googleapis.com/calendar/v3/calendars/primary/events", {"maxResults": 20, "singleEvents": "true", "orderBy": "startTime", "timeMin": _iso()})
@@ -305,10 +376,18 @@ def sync_provider(conn, config: dict, provider: str) -> dict:
 def active_context(conn) -> list[dict]:
     now = _iso()
     conn.execute("DELETE FROM context_signals WHERE expires_at IS NOT NULL AND expires_at<?", (now,))
-    rows = conn.execute("SELECT * FROM context_signals WHERE expires_at IS NULL OR expires_at>=? ORDER BY observed_at DESC", (now,)).fetchall()
-    result = []
+    rows = conn.execute("SELECT rowid,* FROM context_signals WHERE expires_at IS NULL OR expires_at>=? ORDER BY observed_at DESC,rowid DESC", (now,)).fetchall()
+    selected = {}
     for row in rows:
+        rank = CONTEXT_SOURCE_PRIORITY.get(row["source"], 0)
+        key = row["kind"]
+        candidate = (rank, float(row["confidence"]), row["observed_at"], int(row["rowid"]))
+        if key not in selected or candidate > selected[key][0]:
+            selected[key] = (candidate, row)
+    result = []
+    for _, row in sorted(selected.values(), key=lambda item: item[1]["observed_at"], reverse=True):
         item = dict(row)
+        item.pop("rowid", None)
         item["value"] = _safe_json(item.pop("value_json"), {})
         item["active"] = True
         result.append(item)
