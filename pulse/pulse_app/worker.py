@@ -10,7 +10,7 @@ from .integrations import mark_failure, sync_provider
 from .push import send_payload
 from .rules import apply_preference_adjustments, evaluate_notification, notification_copy
 from .sources import collect_candidates
-from .storage import connect, create_morning_catchup, due_reminders, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, record_event_action, record_notification_decision, runtime_config, upsert_event
+from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, record_event_action, record_notification_decision, runtime_config, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
 
@@ -52,7 +52,7 @@ def run_once(config: dict | None = None) -> dict:
     errors = []
     try:
         runtime = runtime_config(conn, config)
-        for provider in ("google", "discord"):
+        for provider in ("google", "discord", "apple-calendar", "apple-contacts", "apple-mail"):
             if conn.execute("SELECT 1 FROM integration_credentials WHERE provider=?", (provider,)).fetchone():
                 try:
                     sync_provider(conn, config, provider)
@@ -61,7 +61,7 @@ def run_once(config: dict | None = None) -> dict:
                     errors.append(provider + ":" + type(exc).__name__)
                     conn.commit()
         direct_candidates = collect_candidates(conn, runtime)
-        candidates = [*direct_candidates]
+        candidates = [*direct_candidates, *game_event_candidates(conn)]
         try:
             candidates.extend(collect_discovery_candidates(conn, runtime, direct_candidates))
         except Exception as exc:

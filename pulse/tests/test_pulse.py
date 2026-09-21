@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import sqlite3
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash
@@ -13,10 +13,10 @@ from werkzeug.security import generate_password_hash
 from pulse_app.app import create_app
 from pulse_app import discovery, sources
 from pulse_app.config import load_config
-from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
+from pulse_app.rules import apply_preference_adjustments, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
-from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record
+from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -362,6 +362,42 @@ def test_discovery_settings_feedback_and_github_webhook(tmp_path):
     duplicate = client.post("/api/webhooks/github", data=raw, headers={**headers, "Content-Type": "application/json"})
     assert duplicate.status_code == 200
     assert duplicate.json["duplicate"] is True
+
+
+def test_topic_relationships_followed_story_and_people_are_scoped(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    person = upsert_person(conn, "icloud", "person-1", "Aiden's teacher", ["teacher@example.test"])
+    assert set_person_importance(conn, person["id"], "important")["importance"] == "important"
+    assert list_people(conn)[0]["importance"] == "important"
+    candidate = {"topic": "apple", "source_id": "mail", "score": 70, "canonical_event_id": "canonical-1", "cluster_id": "cluster-1", "metadata": {"important_person": {"id": person["id"]}}}
+    preferences = {"personal_priorities": {"iphone": 10}, "learned_topic_weights": {}, "learned_source_weights": {}, "followed_stories": {"canonical-1": datetime.now(timezone.utc).isoformat()}}
+    apply_preference_adjustments(candidate, preferences)
+    assert candidate["score"] == 100
+    assert candidate["metadata"]["score_components"]["topic_relationship"] > 0
+    assert candidate["metadata"]["score_components"]["followed_story"] == 18
+    assert candidate["metadata"]["score_components"]["important_person"] == 12
+
+
+def test_calendar_location_makes_weather_preparation_time_aware():
+    candidate = {"topic": "weather", "score": 78, "priority": "normal", "metadata": {}}
+    start = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=2)).isoformat()
+    contexts = [{"kind": "calendar", "value": {"title": "school", "start": start, "location": "School"}}]
+    prepared = prepare_event_candidate(candidate, contexts)
+    assert prepared["metadata"]["score_components"]["context_preparation"] == 10
+
+
+def test_game_event_countdowns_emit_once_per_window(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    event = upsert_game_event(conn, "Warzone", "Season update", (now + timedelta(hours=1)).isoformat(), "season")
+    candidates = game_event_candidates(conn, now)
+    assert candidates[0]["metadata"]["countdown_window"] == "1h"
+    assert game_event_candidates(conn, now) == []
+    assert event["game"] == "Warzone"
 
 
 def test_weather_alerts_cover_rain_storm_heat_cold_and_wind(tmp_path, monkeypatch):

@@ -31,6 +31,8 @@ from .storage import (
     upsert_package_record,
     upsert_purchase,
     upsert_purchase_record,
+    upsert_person,
+    important_person_for,
     upsert_event,
 )
 
@@ -149,7 +151,25 @@ def prepare_event_candidate(candidate: dict, contexts: list[dict] | None = None)
     boost = 0
     reason = ""
     topic = candidate.get("topic")
-    if topic == "weather" and mode in {"outside", "travel"}:
+    upcoming_calendar = [item for item in contexts if item.get("kind") == "calendar"]
+    calendar_soon = False
+    calendar_has_location = False
+    now = _now()
+    for item in upcoming_calendar:
+        value = item.get("value") or {}
+        try:
+            start = datetime.fromisoformat(str(value.get("start", "")).replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            hours = (start.astimezone(timezone.utc) - now).total_seconds() / 3600
+            if 0 <= hours <= 18:
+                calendar_soon = True
+                calendar_has_location = calendar_has_location or bool(value.get("location"))
+        except (TypeError, ValueError):
+            continue
+    if topic == "weather" and calendar_soon and calendar_has_location:
+        boost, reason = 10, "weather may affect an upcoming plan"
+    elif topic == "weather" and mode in {"outside", "travel"}:
         boost, reason = 8, "weather affects current plans"
     elif topic == "travel" and mode == "travel":
         boost, reason = 10, "travel context"
@@ -468,7 +488,11 @@ def _sync_icloud_contacts(conn, config: dict, credentials: dict) -> dict:
             addressbook_url = urljoin(config["ICLOUD_CARDDAV_URL"].rstrip("/") + "/", addressbook_url)
         try:
             contact_response = _icloud_request("REPORT", addressbook_url, credentials, contact_query, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
-            contact_count += len(_contact_data(contact_response.text))
+            contacts = _contact_data(contact_response.text)
+            for contact in contacts:
+                if contact.get("id") and contact.get("name"):
+                    upsert_person(conn, "icloud", contact["id"], contact["name"], contact.get("emails", []), contact.get("importance", "normal"))
+            contact_count += len(contacts)
         except requests.RequestException:
             continue
     set_context_signal(conn, "contacts", {"count": contact_count}, "apple-contacts", 0.7, _iso(_now() + timedelta(days=1)))
@@ -479,7 +503,7 @@ def _sync_icloud_contacts(conn, config: dict, credentials: dict) -> dict:
 def _apple_mail_event(item: dict, config: dict, preferences: dict, contexts: list[dict] | None = None) -> dict:
     message_id = item["message_id"]
     score, relevant, reason = score_item(item["topic"], item["subject"] or "Important iCloud Mail message", item["snippet"], item["keywords"], always_relevant=True, boost=max(0, item["score"] - 82))
-    event = {"id": "icloud-mail-" + hashlib.sha256(message_id.encode()).hexdigest()[:24], "source_id": "icloud-mail", "source_kind": "icloud-mail", "topic": item["topic"], "title": item["subject"] or "Important iCloud Mail message", "summary": item["snippet"] or "Important message detected in iCloud Mail.", "body": f"{reason}; sender: {item['sender']}", "url": "https://www.icloud.com/mail/", "canonical_key": "mail:" + message_id, "published_at": None, "score": max(score, item["score"]), "priority": "critical" if score >= 90 else "high", "relevant": relevant, "metadata": {"source_trust": "primary", "mail_message_id": message_id, "sender": item["sender"], "tracking_number": item.get("tracking_number", ""), "sources": [{"url": "https://www.icloud.com/mail/", "title": "iCloud Mail", "trust": "primary"}]}}
+    event = {"id": "icloud-mail-" + hashlib.sha256(message_id.encode()).hexdigest()[:24], "source_id": "icloud-mail", "source_kind": "icloud-mail", "topic": item["topic"], "title": item["subject"] or "Important iCloud Mail message", "summary": item["snippet"] or "Important message detected in iCloud Mail.", "body": f"{reason}; sender: {item['sender']}", "url": "https://www.icloud.com/mail/", "canonical_key": "mail:" + message_id, "published_at": None, "score": max(score, item["score"]), "priority": "critical" if score >= 90 else "high", "relevant": relevant, "metadata": {"source_trust": "primary", "mail_message_id": message_id, "sender": item["sender"], "tracking_number": item.get("tracking_number", ""), "important_person": item.get("important_person"), "sources": [{"url": "https://www.icloud.com/mail/", "title": "iCloud Mail", "trust": "primary"}]}}
     annotate_candidate(event, config.get("TRACKED_ENTITIES", []))
     apply_preference_adjustments(event, preferences)
     prepare_event_candidate(event, contexts)
@@ -507,6 +531,7 @@ def _sync_icloud_mail(conn, config: dict, credentials: dict) -> dict:
             item = classify_apple_mail_message({"id": uid.decode(errors="ignore"), "snippet": subject, "payload": {"headers": [{"name": "Subject", "value": subject}, {"name": "From", "value": str(parsed.get("From", ""))}]}})
             if not item.get("relevant"):
                 continue
+            item["important_person"] = important_person_for(conn, item.get("sender", ""))
             item["message_id"] = "icloud:" + uid.decode(errors="ignore")
             stored, was_created = upsert_event(conn, _apple_mail_event(item, config, preferences, active_context(conn)))
             created += int(was_created)
@@ -555,7 +580,7 @@ def _gmail_event(item: dict, config: dict, preferences: dict, contexts: list[dic
         "id": "gmail-" + hashlib.sha256(message_id.encode()).hexdigest()[:24], "source_id": "gmail", "source_kind": "gmail", "topic": item["topic"],
         "title": title, "summary": summary, "body": f"{reason}; sender: {item['sender']}", "url": "https://mail.google.com/mail/u/0/#all/" + message_id,
         "canonical_key": "gmail:" + message_id, "published_at": None, "score": max(score, item["score"]), "priority": "critical" if score >= 90 else "high", "relevant": relevant,
-        "metadata": {"source_trust": "primary", "gmail_message_id": message_id, "sender": item["sender"], "tracking_number": item.get("tracking_number", ""), "lifecycle": item.get("lifecycle", {}), "sources": [{"url": "https://mail.google.com", "title": "Gmail", "trust": "primary"}]},
+        "metadata": {"source_trust": "primary", "gmail_message_id": message_id, "sender": item["sender"], "important_person": item.get("important_person"), "tracking_number": item.get("tracking_number", ""), "lifecycle": item.get("lifecycle", {}), "sources": [{"url": "https://mail.google.com", "title": "Gmail", "trust": "primary"}]},
     }
     annotate_candidate(event, config.get("TRACKED_ENTITIES", []))
     apply_preference_adjustments(event, preferences)
@@ -600,6 +625,7 @@ def sync_google(conn, config: dict) -> dict:
         classified = classify_gmail_message(message)
         if not classified.get("relevant"):
             continue
+        classified["important_person"] = important_person_for(conn, classified.get("sender", ""))
         classified["lifecycle"] = persist_gmail_lifecycle(conn, classified)
         event = _gmail_event(classified, config, preferences, active_context(conn))
         stored, was_created = upsert_event(conn, event)
@@ -613,12 +639,19 @@ def sync_google(conn, config: dict) -> dict:
         set_context_signal(conn, "calendar", {"event_id": item.get("id", ""), "title": item.get("summary", ""), "location": item.get("location", ""), "start": start, "end": expires}, "google-calendar", 0.98, expires)
     people_error = ""
     try:
-        people = _google_get(token, "https://people.googleapis.com/v1/people/me/connections", {"pageSize": 100, "personFields": "names"})
+        people = _google_get(token, "https://people.googleapis.com/v1/people/me/connections", {"pageSize": 100, "personFields": "names,emailAddresses"})
     except Exception as exc:
         # Contacts are optional; a People API issue must not block Gmail or Calendar.
         LOGGER.warning("Google People sync skipped error=%s", type(exc).__name__)
         people = {"connections": []}
         people_error = type(exc).__name__
+    for person in people.get("connections", []):
+        names = person.get("names") or []
+        emails = person.get("emailAddresses") or []
+        name = (names[0].get("displayName") if names else "") or ""
+        addresses = [item.get("value", "") for item in emails if item.get("value")]
+        if person.get("resourceName") and name:
+            upsert_person(conn, "google", person["resourceName"], name, addresses)
     set_context_signal(conn, "contacts", {"count": len(people.get("connections", []))}, "google-people", 0.7, _iso(_now() + timedelta(days=1)))
     mark_success(conn, "google", {"gmail_messages": len(gmail.get("messages", [])), "calendar_events": len(calendar.get("items", [])), "contacts_count": len(people.get("connections", [])), "contacts_error": people_error})
     conn.commit()

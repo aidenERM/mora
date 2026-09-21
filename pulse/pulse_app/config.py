@@ -25,7 +25,20 @@ DEFAULT_THRESHOLDS = {
     "system": 0,
 }
 
-PERSONAL_PRIORITY_CATEGORIES = {"apple", "warzone", "gaming", "coding", "ultimate_macro", "packages", "purchases", "weather", "school", "security", "travel", "important_services", "music_media"}
+PERSONAL_PRIORITY_CATEGORIES = {"apple", "warzone", "gaming", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "travel", "discord", "important_services", "important_people", "music_media"}
+
+# Deliberately small, human-readable relationships. These are used as weak
+# signals for scoring and discovery, never as a replacement for exact event
+# identity or source validation.
+TOPIC_RELATIONSHIPS = {
+    "apple": {"iphone", "ios", "siri", "apple_intelligence", "tech"},
+    "warzone": {"gaming", "cod", "weapon_balance", "season", "maintenance"},
+    "github": {"coding", "development", "ultimate_macro", "pulse", "release"},
+    "package": {"purchase", "delivery", "merchant"},
+    "purchase": {"package", "merchant", "receipt"},
+    "security": {"important_services", "account"},
+    "discord": {"gaming", "coding", "community"},
+}
 
 # These floors keep an accidentally permissive stored preference or old .env
 # value from turning Pulse back into an RSS-to-push relay.

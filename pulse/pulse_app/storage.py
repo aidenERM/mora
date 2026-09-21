@@ -148,6 +148,29 @@ CREATE TABLE IF NOT EXISTS purchases (
     metadata TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS game_events (
+    id TEXT PRIMARY KEY,
+    game TEXT NOT NULL,
+    title TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'event',
+    starts_at TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    notified_windows TEXT NOT NULL DEFAULT '[]',
+    active INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_game_events_start ON game_events(active, starts_at);
+CREATE TABLE IF NOT EXISTS people (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    emails TEXT NOT NULL DEFAULT '[]',
+    importance TEXT NOT NULL DEFAULT 'normal',
+    updated_at TEXT NOT NULL,
+    UNIQUE(provider, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_people_importance ON people(importance, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_recent ON events(discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic, discovered_at DESC);
 CREATE TABLE IF NOT EXISTS canonical_events (
@@ -456,6 +479,143 @@ def upsert_purchase(conn: sqlite3.Connection, external_key: str, **fields) -> st
     return upsert_purchase_record(conn, external_key, **fields)["id"]
 
 
+def list_packages(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    result = []
+    for row in conn.execute("SELECT * FROM packages ORDER BY updated_at DESC LIMIT ?", (max(1, min(200, int(limit))),)).fetchall():
+        item = dict(row)
+        item["status_history"] = _safe_json(item.get("status_history"), []) or []
+        result.append(item)
+    return result
+
+
+def list_purchases(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    result = []
+    for row in conn.execute("SELECT * FROM purchases ORDER BY updated_at DESC LIMIT ?", (max(1, min(200, int(limit))),)).fetchall():
+        item = dict(row)
+        item["metadata"] = _safe_json(item.get("metadata"), {}) or {}
+        result.append(item)
+    return result
+
+
+def set_purchase_watch(conn: sqlite3.Connection, purchase_id: str, priority: str) -> dict | None:
+    if priority not in {"off", "normal", "high"}:
+        raise ValueError("invalid watch priority")
+    row = conn.execute("SELECT * FROM purchases WHERE id=?", (purchase_id,)).fetchone()
+    if not row:
+        return None
+    metadata = _safe_json(row["metadata"], {}) or {}
+    metadata["watch_priority"] = priority
+    conn.execute("UPDATE purchases SET metadata=?,updated_at=? WHERE id=?", (json.dumps(metadata, separators=(",", ":")), utc_now(), purchase_id))
+    item = dict(row)
+    item["metadata"] = metadata
+    item["watch_priority"] = priority
+    return item
+
+
+def upsert_game_event(conn: sqlite3.Connection, game: str, title: str, starts_at: str, kind: str = "event", url: str = "", event_id: str = "") -> dict:
+    game = str(game).strip()[:80]
+    title = str(title).strip()[:240]
+    starts_at = str(starts_at).strip()[:80]
+    if not game or not title or not starts_at:
+        raise ValueError("game, title, and starts_at are required")
+    event_id = event_id.strip()[:120] if event_id else "game-event-" + hashlib.sha256((game + ":" + title + ":" + starts_at).encode()).hexdigest()[:24]
+    existing = conn.execute("SELECT * FROM game_events WHERE id=?", (event_id,)).fetchone()
+    windows = _safe_json(existing["notified_windows"], []) if existing else []
+    values = (game, title, str(kind).strip()[:60] or "event", starts_at, str(url).strip()[:500], json.dumps(windows or [], separators=(",", ":")), 1, utc_now())
+    if existing:
+        conn.execute("UPDATE game_events SET game=?,title=?,kind=?,starts_at=?,url=?,notified_windows=?,active=?,updated_at=? WHERE id=?", (*values, event_id))
+    else:
+        conn.execute("INSERT INTO game_events(id,game,title,kind,starts_at,url,notified_windows,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (event_id, *values))
+    return {"id": event_id, "game": values[0], "title": values[1], "kind": values[2], "starts_at": values[3], "url": values[4], "notified_windows": windows or [], "active": True}
+
+
+def list_game_events(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    result = []
+    for row in conn.execute("SELECT * FROM game_events WHERE active=1 ORDER BY starts_at LIMIT ?", (max(1, min(200, int(limit))),)).fetchall():
+        item = dict(row)
+        item["notified_windows"] = _safe_json(item.get("notified_windows"), []) or []
+        result.append(item)
+    return result
+
+
+def game_event_candidates(conn: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
+    result = []
+    for item in list_game_events(conn, 200):
+        try:
+            starts = datetime.fromisoformat(item["starts_at"].replace("Z", "+00:00"))
+            if starts.tzinfo is None:
+                starts = starts.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        hours = (starts - now).total_seconds() / 3600
+        window = "1h" if 0 <= hours <= 1.5 else "24h" if 22 <= hours <= 26 else ""
+        if not window or window in item["notified_windows"]:
+            continue
+        remaining = max(0, round(hours * 60))
+        result.append({
+            "id": f"{item['id']}:{window}", "source_id": "game-events", "source_kind": "game-event", "topic": "warzone" if item["game"].casefold() in {"warzone", "call of duty", "cod"} else "watcher",
+            "title": f"{item['title']} starts in {remaining // 60}h" if remaining >= 60 else f"{item['title']} starts soon",
+            "summary": f"{item['game']} {item['kind']} begins at {starts.astimezone(timezone.utc).isoformat()}.",
+            "body": "A gaming event you configured is approaching.", "url": item["url"], "canonical_key": f"game-event:{item['id']}:{window}", "published_at": now.isoformat(),
+            "score": 86 if window == "1h" else 82, "priority": "high", "relevant": True,
+            "metadata": {"source_trust": "primary", "game_event_id": item["id"], "countdown_window": window, "status_change": True, "entities": [item["game"]]},
+        })
+        conn.execute("UPDATE game_events SET notified_windows=?,updated_at=? WHERE id=?", (json.dumps([*item["notified_windows"], window], separators=(",", ":")), utc_now(), item["id"]))
+    return result
+
+
+def upsert_person(conn: sqlite3.Connection, provider: str, external_id: str, name: str = "", emails: list[str] | None = None, importance: str = "normal") -> dict:
+    provider = str(provider).strip()[:60]
+    external_id = str(external_id).strip()[:180]
+    if not provider or not external_id:
+        raise ValueError("person provider and id are required")
+    importance = importance if importance in {"important", "normal", "ignore"} else "normal"
+    existing = conn.execute("SELECT * FROM people WHERE provider=? AND external_id=?", (provider, external_id)).fetchone()
+    person_id = existing["id"] if existing else "person-" + hashlib.sha256((provider + ":" + external_id).encode()).hexdigest()[:24]
+    safe_emails = [str(item).strip()[:160] for item in (emails or []) if str(item).strip()][:5]
+    if existing and importance == "normal":
+        importance = existing["importance"]
+    values = (provider, external_id, str(name).strip()[:160], json.dumps(safe_emails, separators=(",", ":")), importance, utc_now())
+    if existing:
+        conn.execute("UPDATE people SET name=?,emails=?,importance=?,updated_at=? WHERE id=?", (values[2], values[3], values[4], values[5], person_id))
+    else:
+        conn.execute("INSERT INTO people(id,provider,external_id,name,emails,importance,updated_at) VALUES(?,?,?,?,?,?,?)", (person_id, *values))
+    return {"id": person_id, "provider": provider, "external_id": external_id, "name": values[2], "emails": safe_emails, "importance": importance}
+
+
+def list_people(conn: sqlite3.Connection) -> list[dict]:
+    result = []
+    for row in conn.execute("SELECT * FROM people ORDER BY importance DESC,name COLLATE NOCASE").fetchall():
+        item = dict(row)
+        item["emails"] = _safe_json(item.get("emails"), []) or []
+        result.append(item)
+    return result
+
+
+def set_person_importance(conn: sqlite3.Connection, person_id: str, importance: str) -> dict | None:
+    if importance not in {"important", "normal", "ignore"}:
+        raise ValueError("invalid importance")
+    conn.execute("UPDATE people SET importance=?,updated_at=? WHERE id=?", (importance, utc_now(), person_id))
+    row = conn.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["emails"] = _safe_json(item.get("emails"), []) or []
+    return item
+
+
+def important_person_for(conn: sqlite3.Connection, sender: str) -> dict | None:
+    text = str(sender or "").casefold()
+    if not text:
+        return None
+    for row in conn.execute("SELECT * FROM people WHERE importance='important'").fetchall():
+        emails = _safe_json(row["emails"], []) or []
+        if any(str(address).casefold() in text for address in emails) or (row["name"] and str(row["name"]).casefold() in text):
+            return {"id": row["id"], "name": row["name"]}
+    return None
+
+
 def init_db(path: str | Path, initial_password_hash: str = "") -> None:
     conn = connect(path)
     try:
@@ -610,7 +770,7 @@ def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     base["muted_topics"] = stored.get("muted_topics", {})
     base["personal_priorities"] = {**base["personal_priorities"], **(stored.get("personal_priorities", {}) if isinstance(stored.get("personal_priorities", {}), dict) else {})}
     base["temporary_priority"] = stored.get("temporary_priority", {}) if isinstance(stored.get("temporary_priority", {}), dict) else {}
-    for key in ("followed_entities", "less_like_entities", "less_like_topics"):
+    for key in ("followed_entities", "followed_stories", "less_like_entities", "less_like_topics"):
         base[key] = stored.get(key, {}) if isinstance(stored.get(key, {}), dict) else {}
     stored_weights = stored.get("learned_topic_weights", {}) if isinstance(stored.get("learned_topic_weights", {}), dict) else {}
     base["learned_topic_weights"] = {**passive_topic_weights(conn), **feedback_weights(conn, "topic"), **stored_weights}
@@ -712,7 +872,7 @@ def clear_learning(conn: sqlite3.Connection) -> None:
     preferences = get_json_setting(conn, "preferences", {})
     if not isinstance(preferences, dict):
         preferences = {}
-    for key in ("followed_entities", "less_like_entities", "less_like_topics", "learned_topic_weights"):
+    for key in ("followed_entities", "followed_stories", "less_like_entities", "less_like_topics", "learned_topic_weights"):
         preferences.pop(key, None)
     conn.execute(
         "INSERT INTO settings(key,value) VALUES('preferences',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

@@ -47,6 +47,13 @@ from .storage import (
     set_reminder,
     clear_reminder,
     clear_context_signals,
+    list_people,
+    set_person_importance,
+    list_packages,
+    list_purchases,
+    set_purchase_watch,
+    list_game_events,
+    upsert_game_event,
     upsert_event,
 )
 from .worker import _payload
@@ -513,6 +520,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             summary=event_action_summary(db()),
             metrics=learning_metrics(db()),
             followed_entities=preferences.get("followed_entities", {}),
+            followed_stories=preferences.get("followed_stories", {}),
             less_like_entities=preferences.get("less_like_entities", {}),
             less_like_topics=preferences.get("less_like_topics", {}),
             learned_topic_weights=preferences.get("learned_topic_weights", {}),
@@ -533,6 +541,44 @@ def create_app(test_config: dict | None = None) -> Flask:
         except ValueError:
             limit = 30
         return jsonify(events=list_events(db(), limit, request.args.get("topic")))
+
+    @app.get("/api/packages")
+    @require_auth
+    def packages():
+        return jsonify(packages=list_packages(db()))
+
+    @app.get("/api/purchases")
+    @require_auth
+    def purchases():
+        return jsonify(purchases=list_purchases(db()))
+
+    @app.patch("/api/purchases/<purchase_id>/watch")
+    @require_auth
+    def purchase_watch(purchase_id: str):
+        try:
+            item = set_purchase_watch(db(), purchase_id, str(_json_body().get("priority", "normal")))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        if not item:
+            return jsonify(error="not_found"), 404
+        db().commit()
+        return jsonify(purchase=item)
+
+    @app.get("/api/game-events")
+    @require_auth
+    def game_events():
+        return jsonify(events=list_game_events(db()))
+
+    @app.post("/api/game-events")
+    @require_auth
+    def game_event_create():
+        body = _json_body()
+        try:
+            item = upsert_game_event(db(), body.get("game", ""), body.get("title", ""), body.get("starts_at", ""), body.get("kind", "event"), body.get("url", ""), body.get("id", ""))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        db().commit()
+        return jsonify(event=item), 201
 
     @app.get("/api/events/<event_id>")
     @require_auth
@@ -579,6 +625,14 @@ def create_app(test_config: dict | None = None) -> Flask:
             prefs["followed_entities"][entity_id] = _now().isoformat()
             save_preferences(db(), prefs)
             record_event_action(db(), event_id, "follow", entity_id)
+        elif action == "follow_story":
+            story_id = event.get("canonical_event_id") or event.get("cluster_id")
+            if not story_id:
+                return jsonify(error="story_unavailable"), 400
+            prefs = get_preferences(db(), config)
+            prefs.setdefault("followed_stories", {})[story_id] = _now().isoformat()
+            save_preferences(db(), prefs)
+            record_event_action(db(), event_id, "follow_story", story_id)
         elif action == "less_like":
             prefs = get_preferences(db(), config)
             if entity_id:
@@ -596,6 +650,23 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify(error="invalid_feedback"), 400
         db().commit()
         return jsonify(ok=True, preferences=get_preferences(db(), config))
+
+    @app.get("/api/people")
+    @require_auth
+    def people_list():
+        return jsonify(people=list_people(db()))
+
+    @app.patch("/api/people/<person_id>")
+    @require_auth
+    def people_importance(person_id: str):
+        try:
+            item = set_person_importance(db(), person_id, str(_json_body().get("importance", "normal")))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        if not item:
+            return jsonify(error="not_found"), 404
+        db().commit()
+        return jsonify(person=item)
 
     @app.post("/api/events/<event_id>/remind")
     @require_auth

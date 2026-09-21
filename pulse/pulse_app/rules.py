@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
-from .config import STRICT_MIN_THRESHOLDS
+from .config import STRICT_MIN_THRESHOLDS, TOPIC_RELATIONSHIPS
 
 CRITICAL_TERMS = {
     "outage", "emergency", "warning", "critical", "recall", "security", "breach",
@@ -325,6 +325,43 @@ def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
     if source_weight:
         adjustment += max(-8, min(8, source_weight))
         reasons.append("source learning")
+    relationship_weight = 0
+    related_topics = TOPIC_RELATIONSHIPS.get(candidate.get("topic"), set())
+    priority_values = preferences.get("personal_priorities") or {}
+    learned_values = preferences.get("learned_topic_weights") or {}
+    for related in related_topics:
+        relationship_weight += int(priority_values.get(related, 0))
+        relationship_weight += int(learned_values.get(related, 0)) // 2
+    relationship_weight = max(-8, min(8, relationship_weight))
+    if relationship_weight:
+        adjustment += relationship_weight
+        reasons.append("related-topic interest")
+    components = dict((candidate.get("metadata") or {}).get("score_components") or {})
+    components["topic_relationship"] = relationship_weight
+    candidate.setdefault("metadata", {})["related_topics"] = sorted(related_topics)
+    followed_stories = preferences.get("followed_stories") or {}
+    story_ids = {str(candidate.get("canonical_event_id") or ""), str(candidate.get("cluster_id") or "")}
+    story_ids.discard("")
+    followed_story = False
+    for story_id in story_ids:
+        value = followed_stories.get(story_id)
+        if isinstance(value, dict):
+            value = value.get("followed_at")
+        try:
+            followed_story = followed_story or bool(value and datetime.fromisoformat(str(value).replace("Z", "+00:00")) > datetime.now(timezone.utc) - timedelta(days=30))
+        except (TypeError, ValueError):
+            pass
+    if followed_story:
+        development = (candidate.get("metadata") or {}).get("development_meaningful", True)
+        story_boost = 18 if development else 8
+        adjustment += story_boost
+        reasons.append("followed story")
+        components["followed_story"] = story_boost
+    important_person = (candidate.get("metadata") or {}).get("important_person")
+    if important_person:
+        adjustment += 12
+        reasons.append("important person")
+        components["important_person"] = 12
     aliases = {"warzone": {"gaming"}, "github": {"coding", "ultimate_macro"}, "package": {"packages"}, "purchase": {"purchases"}, "apple": {"music_media"}, "security": {"important_services"}}
     priority_values = preferences.get("personal_priorities") or {}
     manual_weight = sum(int(priority_values.get(key, 0)) for key in {candidate.get("topic"), *(aliases.get(candidate.get("topic"), set()))})
@@ -351,7 +388,6 @@ def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
         candidate["score"] = max(0, min(100, int(candidate.get("score", 0)) + adjustment))
         candidate["body"] = (candidate.get("body") or "matched relevance rules") + "; " + ", ".join(reasons)
         candidate["priority"] = priority_for(candidate["score"])
-    components = dict((candidate.get("metadata") or {}).get("score_components") or {})
     components["learning"] = adjustment
     components["final"] = int(candidate.get("score", 0))
     candidate.setdefault("metadata", {})["score_components"] = components
