@@ -14,6 +14,7 @@ const state = {
   serviceWorkerRegistration: null,
   serviceWorkerReady: null,
   gameEvents: [],
+  showAllHistory: false,
 };
 
 const app = document.querySelector("#app");
@@ -316,10 +317,13 @@ async function renderAppleSetup() {
 
 function renderHome() {
   document.title = "Pulse · quiet signals";
-  const events = state.events.length ? state.events.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
+  const importantEvents = state.events.filter((item) => item.notified_at || ["critical", "high"].includes(item.priority));
+  const visibleEvents = state.showAllHistory ? state.events : importantEvents;
+  const events = visibleEvents.length ? visibleEvents.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
   const activeMode = state.context?.find((item) => item.kind === "mode")?.value?.mode || "quiet mode";
-  const urgent = state.events.filter((item) => ["critical", "high"].includes(item.priority)).length;
-  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">aiden · personal signal layer</span><h1>your pulse</h1><p>the few things worth opening.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">latest</span><h2>signals</h2></div><span class="muted">filtered for you</span></section><section class="event-list">${events}</section><div id="settings-anchor">${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}</div><p class="footer-note">quiet by default · private by design</p>`;
+  const urgent = importantEvents.length;
+  const historyAction = state.events.length > importantEvents.length ? `<button class="button ghost-button full" data-action="show-history">${state.showAllHistory ? "show important only" : `show all ${state.events.length} saved events`}</button>` : "";
+  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">aiden · personal signal layer</span><h1>your pulse</h1><p>the few things worth opening.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">latest</span><h2>signals</h2></div><span class="muted">${state.showAllHistory ? "full history" : "filtered for you"}</span></section><section class="event-list">${events}</section>${historyAction}<div id="settings-anchor">${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}</div><p class="footer-note">quiet by default · private by design</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -456,6 +460,7 @@ document.addEventListener("click", async (event) => {
     if (action === "logout") { await api("/api/auth/logout", { method: "POST", body: "{}" }); state.authenticated = false; render(); }
     if (action === "back") { history.pushState({}, "", "/"); await loadAuthenticatedState(); render(); }
     if (action === "reload") window.location.reload();
+    if (action === "show-history") { state.showAllHistory = !state.showAllHistory; renderHome(); return; }
     if (action === "remind") { await api(`/api/events/${encodeURIComponent(event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id)}/remind`, { method: "POST", body: JSON.stringify({ minutes: 60 }) }); showToast("reminder set for one hour"); }
     if (action === "watch-purchase") { await api(`/api/purchases/${encodeURIComponent(event.target.closest("[data-purchase-id]")?.dataset.purchaseId)}/watch`, { method: "PATCH", body: JSON.stringify({ priority: "high" }) }); showToast("purchase watch enabled"); }
     if (action === "draft-reply") {
