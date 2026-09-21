@@ -67,6 +67,33 @@ DEFAULT_SOURCES = [
         "trust": "primary",
         "keywords": ["discord", "security", "outage", "announcement", "patch", "release"],
     },
+    {
+        "id": "rocket-league-news-search",
+        "kind": "rss",
+        "label": "Rocket League major news",
+        "url": "https://news.google.com/rss/search?q=Rocket+League+patch+notes+OR+season+OR+RLCS&hl=en-US&gl=US&ceid=US:en",
+        "topic": "rocket_league",
+        "trust": "reliable_secondary",
+        "keywords": ["rocket league", "patch", "season", "rlcs", "maintenance", "update"],
+    },
+    {
+        "id": "instagram-major-news-search",
+        "kind": "rss",
+        "label": "Instagram major news",
+        "url": "https://news.google.com/rss/search?q=Instagram+major+announcement+OR+security+OR+outage&hl=en-US&gl=US&ceid=US:en",
+        "topic": "instagram",
+        "trust": "reliable_secondary",
+        "keywords": ["instagram", "major", "announcement", "security", "outage", "update"],
+    },
+    {
+        "id": "unstable-smp-news-search",
+        "kind": "rss",
+        "label": "Unstable SMP / Universe",
+        "url": "https://news.google.com/rss/search?q=Unstable+SMP+OR+Unstable+Universe&hl=en-US&gl=US&ceid=US:en",
+        "topic": "unstable_smp",
+        "trust": "reliable_secondary",
+        "keywords": ["unstable smp", "unstable universe", "update", "season", "announcement"],
+    },
 ]
 
 

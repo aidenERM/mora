@@ -275,6 +275,10 @@ def test_default_high_value_sources_are_official_and_domain_scoped():
     assert configured["openai-news-rss"]["topic"] == "openai"
     assert configured["discord-blog-rss"]["url"] == "https://discord.com/blog/rss.xml"
     assert configured["discord-blog-rss"]["topic"] == "discord"
+    assert configured["rocket-league-news-search"]["topic"] == "rocket_league"
+    assert configured["instagram-major-news-search"]["topic"] == "instagram"
+    assert configured["unstable-smp-news-search"]["topic"] == "unstable_smp"
+    assert all(configured[key]["trust"] == "reliable_secondary" for key in ("rocket-league-news-search", "instagram-major-news-search", "unstable-smp-news-search"))
 
 
 def test_personal_discovery_profiles_keep_domains_separate():
