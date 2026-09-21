@@ -22,22 +22,32 @@ DEFAULT_THRESHOLDS = {
     "school": 86,
     "travel": 86,
     "discord": 84,
+    "openai": 88,
+    "ios": 88,
+    "instagram": 90,
+    "rocket_league": 86,
+    "unstable_smp": 86,
     "system": 0,
 }
 
-PERSONAL_PRIORITY_CATEGORIES = {"apple", "warzone", "gaming", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "travel", "discord", "important_services", "important_people", "music_media"}
+PERSONAL_PRIORITY_CATEGORIES = {"apple", "ios", "openai", "warzone", "gaming", "rocket_league", "unstable_smp", "coding", "development", "ultimate_macro", "pulse", "packages", "purchases", "weather", "school", "security", "travel", "discord", "instagram", "important_services", "important_people", "music_media"}
 
 # Deliberately small, human-readable relationships. These are used as weak
 # signals for scoring and discovery, never as a replacement for exact event
 # identity or source validation.
 TOPIC_RELATIONSHIPS = {
-    "apple": {"iphone", "ios", "siri", "apple_intelligence", "tech"},
+    "apple": {"ios", "iphone", "siri", "apple_intelligence", "tech"},
+    "ios": {"apple", "iphone", "apple_intelligence"},
+    "openai": {"chatgpt", "ai", "coding"},
     "warzone": {"gaming", "cod", "weapon_balance", "season", "maintenance"},
+    "rocket_league": {"gaming", "esports", "season"},
+    "unstable_smp": {"gaming", "minecraft", "creator"},
     "github": {"coding", "development", "ultimate_macro", "pulse", "release"},
     "package": {"purchase", "delivery", "merchant"},
     "purchase": {"package", "merchant", "receipt"},
     "security": {"important_services", "account"},
     "discord": {"gaming", "coding", "community"},
+    "instagram": {"social", "creator", "important_people"},
 }
 
 # These floors keep an accidentally permissive stored preference or old .env
@@ -56,6 +66,11 @@ STRICT_MIN_THRESHOLDS = {
     "school": 86,
     "travel": 86,
     "discord": 84,
+    "openai": 88,
+    "ios": 88,
+    "instagram": 90,
+    "rocket_league": 86,
+    "unstable_smp": 86,
     "system": 0,
 }
 
@@ -87,6 +102,11 @@ TOPIC_LABELS = {
     "school": "School",
     "travel": "Travel",
     "discord": "Discord",
+    "openai": "ChatGPT / OpenAI",
+    "ios": "iOS / betas",
+    "instagram": "Instagram",
+    "rocket_league": "Rocket League",
+    "unstable_smp": "Unstable SMP / Universe",
     "system": "Pulse",
 }
 
@@ -116,6 +136,38 @@ DEFAULT_SEARCH_PROFILES = [
         "active": True,
     },
     {
+        "id": "chatgpt-discovery",
+        "label": "ChatGPT and OpenAI",
+        "topic": "openai",
+        "queries": ["site:openai.com ChatGPT release", "ChatGPT major announcement", "OpenAI security update"],
+        "keywords": ["chatgpt", "openai", "release", "model", "security", "availability"],
+        "active": True,
+    },
+    {
+        "id": "ios-discovery",
+        "label": "iOS and Apple software",
+        "topic": "ios",
+        "queries": ["site:apple.com/newsroom iOS beta release", "iOS beta official release notes", "Apple confirmed iOS feature"],
+        "keywords": ["ios", "beta", "release", "security", "official", "apple"],
+        "active": True,
+    },
+    {
+        "id": "social-major-discovery",
+        "label": "Major Instagram and Discord news",
+        "topic": "instagram",
+        "queries": ["Instagram major announcement official", "Instagram outage security official", "Discord major announcement official"],
+        "keywords": ["instagram", "discord", "security", "outage", "official", "announcement"],
+        "active": True,
+    },
+    {
+        "id": "gaming-discovery",
+        "label": "Rocket League and Unstable Universe",
+        "topic": "rocket_league",
+        "queries": ["Rocket League major update official", "Unstable SMP major update", "Unstable Universe announcement"],
+        "keywords": ["rocket league", "unstable smp", "unstable universe", "update", "season", "announcement"],
+        "active": True,
+    },
+    {
         "id": "colombia-discovery",
         "label": "Colombia and Medellín",
         "topic": "colombia",
@@ -132,7 +184,12 @@ DEFAULT_TRACKED_ENTITIES = [
     {"id": "ps5-pro", "name": "PS5 Pro", "aliases": ["PS5 Pro", "PlayStation 5 Pro"], "topic": "apple", "boost": 10},
     {"id": "apple-watch-series-12", "name": "Apple Watch Series 12", "aliases": ["Apple Watch Series 12"], "topic": "apple", "boost": 14},
     {"id": "iphone-18", "name": "iPhone 18", "aliases": ["iPhone 18"], "topic": "apple", "boost": 14},
-    {"id": "openai", "name": "OpenAI", "aliases": ["OpenAI", "GPT"], "topic": "apple", "boost": 12},
+    {"id": "openai", "name": "OpenAI", "aliases": ["OpenAI", "ChatGPT", "GPT"], "topic": "openai", "boost": 18},
+    {"id": "unstable-smp", "name": "Unstable SMP", "aliases": ["Unstable SMP", "Unstable Universe", "Universe SMP"], "topic": "unstable_smp", "boost": 20},
+    {"id": "rocket-league", "name": "Rocket League", "aliases": ["Rocket League"], "topic": "rocket_league", "boost": 18},
+    {"id": "instagram", "name": "Instagram", "aliases": ["Instagram"], "topic": "instagram", "boost": 10},
+    {"id": "discord", "name": "Discord", "aliases": ["Discord"], "topic": "discord", "boost": 12},
+    {"id": "ios", "name": "iOS", "aliases": ["iOS", "iPadOS", "iOS beta"], "topic": "ios", "boost": 16},
     {"id": "ultimate-macro", "name": "Ultimate Macro", "aliases": ["Ultimate Macro"], "topic": "github", "boost": 18},
     {"id": "aidenerm-mora", "name": "aidenERM/mora", "aliases": ["aidenERM/mora"], "topic": "github", "boost": 18},
 ]
@@ -201,6 +258,11 @@ def load_config(test_config: dict | None = None) -> dict:
             "school": 240,
             "travel": 180,
             "discord": 240,
+            "openai": 180,
+            "ios": 240,
+            "instagram": 360,
+            "rocket_league": 180,
+            "unstable_smp": 240,
             "system": 0,
         }, **(_json("PULSE_NOTIFICATION_COOLDOWNS_JSON", {}) or {})},
         "NOTIFICATION_MAX_AGE": {**{
@@ -217,6 +279,11 @@ def load_config(test_config: dict | None = None) -> dict:
             "school": 1440,
             "travel": 1440,
             "discord": 720,
+            "openai": 1440,
+            "ios": 1440,
+            "instagram": 1440,
+            "rocket_league": 1440,
+            "unstable_smp": 1440,
             "system": 1440,
         }, **(_json("PULSE_NOTIFICATION_MAX_AGE_JSON", {}) or {})},
         "ROLLING_NOTIFICATION_LIMITS": {**DEFAULT_ROLLING_NOTIFICATION_LIMITS, **(_json("PULSE_ROLLING_NOTIFICATION_LIMITS_JSON", {}) or {})},
@@ -229,6 +296,8 @@ def load_config(test_config: dict | None = None) -> dict:
         "MATERIAL_UPDATE_SCORE_DELTA": max(5, min(40, int(os.environ.get("PULSE_MATERIAL_UPDATE_SCORE_DELTA", "12")))),
         "MORNING_CATCHUP_ENABLED": _bool("PULSE_MORNING_CATCHUP_ENABLED", True),
         "MORNING_CATCHUP_WINDOW_MINUTES": max(15, min(180, int(os.environ.get("PULSE_MORNING_CATCHUP_WINDOW_MINUTES", "60")))),
+        "HISTORY_RETENTION_DAYS": max(90, min(1825, int(os.environ.get("PULSE_HISTORY_RETENTION_DAYS", "365")))),
+        "DECISION_RETENTION_DAYS": max(30, min(730, int(os.environ.get("PULSE_DECISION_RETENTION_DAYS", "180")))),
         "VAPID_PUBLIC_KEY": os.environ.get("PULSE_VAPID_PUBLIC_KEY", ""),
         "VAPID_PRIVATE_KEY": os.environ.get("PULSE_VAPID_PRIVATE_KEY", ""),
         "VAPID_SUBJECT": os.environ.get("PULSE_VAPID_SUBJECT", ""),

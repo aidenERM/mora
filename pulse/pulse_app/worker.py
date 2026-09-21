@@ -10,7 +10,7 @@ from .integrations import mark_failure, sync_provider
 from .push import send_payload
 from .rules import apply_preference_adjustments, evaluate_notification, notification_copy
 from .sources import collect_candidates
-from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, record_event_action, record_notification_decision, runtime_config, upsert_event
+from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, prune_history, record_event_action, record_notification_decision, runtime_config, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
 
@@ -113,6 +113,7 @@ def run_once(config: dict | None = None) -> dict:
             except Exception as exc:
                 errors.append(str(exc))
                 LOGGER.exception("reminder failed for %s", event["id"])
+        prune_history(conn, runtime, now)
         return {"inserted": inserted, "notifications": notifications, "errors": errors}
     finally:
         conn.close()

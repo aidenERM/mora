@@ -13,6 +13,7 @@ const state = {
   detail: null,
   serviceWorkerRegistration: null,
   serviceWorkerReady: null,
+  gameEvents: [],
 };
 
 const app = document.querySelector("#app");
@@ -47,6 +48,10 @@ function formatDate(value) {
 
 function topicLabel(topic) {
   return state.config?.topics?.find((item) => item.id === topic)?.label || topic;
+}
+
+function topicGlyph(topic) {
+  return { weather: "☼", earthquake: "≈", warzone: "✦", rocket_league: "◎", unstable_smp: "◇", apple: "⌘", ios: "◐", openai: "✳", instagram: "◎", discord: "◈", github: "⌁", package: "▣", purchase: "$", security: "!", colombia: "•" }[topic] || "·";
 }
 
 function isStandalone() {
@@ -134,7 +139,7 @@ async function enableAlerts() {
 }
 
 async function loadAuthenticatedState() {
-  const [events, preferences, discovery, learning, audit, integrations] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/integrations")]);
+  const [events, preferences, discovery, learning, audit, integrations, gameEvents] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/integrations"), api("/api/game-events")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
   state.discovery = discovery;
@@ -143,6 +148,7 @@ async function loadAuthenticatedState() {
   state.integrations = integrations.integrations || [];
   state.context = integrations.context || [];
   state.devices = integrations.devices || [];
+  state.gameEvents = gameEvents.events || [];
   await checkSubscription();
 }
 
@@ -169,18 +175,18 @@ function alertCard() {
 
 function eventCard(event) {
   const confidence = event.metadata?.confidence || "direct";
-  return `<button class="event-card" data-event-id="${escapeHtml(event.id)}">
-    <div class="event-card-top"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span class="event-time">${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></div>
-    <h3>${escapeHtml(event.title)}</h3>
-    <p>${escapeHtml(event.summary || event.body || "Open for details")}</p>
-    <div class="event-card-bottom"><span class="priority priority-${escapeHtml(event.priority)}">${escapeHtml(event.priority)}</span><span class="confidence confidence-${escapeHtml(confidence)}">${escapeHtml(confidence)}</span><span class="score">${event.score}/100</span></div>
-  </button>`;
+  return `<button class="event-card" data-event-id="${escapeHtml(event.id)}"><span class="event-glyph topic-${escapeHtml(event.topic)}">${topicGlyph(event.topic)}</span><span class="event-card-copy"><span class="event-card-top"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span class="event-time">${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></span><h3>${escapeHtml(event.title)}</h3><p>${escapeHtml(event.summary || event.body || "Open for details")}</p><span class="event-card-bottom"><span class="priority priority-${escapeHtml(event.priority)}">${escapeHtml(event.priority)}</span><span class="confidence confidence-${escapeHtml(confidence)}">${escapeHtml(confidence)}</span></span></span></button>`;
 }
 
 function rulesCard() {
   const prefs = state.preferences || { quiet_start: "23:00", quiet_end: "07:00", topic_thresholds: {} };
   const thresholdRows = Object.entries(prefs.topic_thresholds || {}).filter(([topic]) => topic !== "system").map(([topic, value]) => `<label class="threshold-row"><span>${escapeHtml(topicLabel(topic))}</span><input data-threshold-topic="${escapeHtml(topic)}" type="range" min="0" max="100" step="1" value="${Number(value)}"><output>${Number(value)}</output></label>`).join("");
-  return `<details class="rules-card"><summary><span><span class="eyebrow">rules</span><strong>quiet hours and relevance</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><div class="time-row"><label>quiet from<input id="quiet-start" type="time" value="${escapeHtml(prefs.quiet_start)}"></label><label>until<input id="quiet-end" type="time" value="${escapeHtml(prefs.quiet_end)}"></label></div><div class="thresholds"><p class="field-note">notify only when a topic reaches its threshold</p>${thresholdRows}</div><button class="button secondary full" data-action="save-rules">save rules</button></div></details>`;
+  const priorityTopics = ["apple", "ios", "openai", "warzone", "rocket_league", "unstable_smp", "github", "package", "purchase", "weather", "school", "security", "travel", "discord", "instagram"];
+  const priorityRows = priorityTopics.map((topic) => `<label class="threshold-row"><span>${escapeHtml(topicLabel(topic))}</span><input data-priority-topic="${topic}" type="range" min="-20" max="20" step="1" value="${Number(prefs.personal_priorities?.[topic] || 0)}"><output>${Number(prefs.personal_priorities?.[topic] || 0)}</output></label>`).join("");
+  const temp = prefs.temporary_priority || {};
+  const activeTemp = Object.entries(temp).find(([, value]) => value?.expires_at && new Date(value.expires_at) > new Date());
+  const gameEvents = (state.gameEvents || []).map((item) => `<div class="source-row"><span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.game)} · ${escapeHtml(item.starts_at)}</small></span><button class="button ghost-button" data-action="delete-game-event" data-game-event-id="${escapeHtml(item.id)}">remove</button></div>`).join("") || `<p class="fine-print">no countdowns configured</p>`;
+  return `<details class="rules-card"><summary><span><span class="eyebrow">rules</span><strong>quiet hours and relevance</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><div class="time-row"><label>quiet from<input id="quiet-start" type="time" value="${escapeHtml(prefs.quiet_start)}"></label><label>until<input id="quiet-end" type="time" value="${escapeHtml(prefs.quiet_end)}"></label></div><div class="thresholds"><p class="field-note">notify only when a topic reaches its threshold</p>${thresholdRows}</div><div class="thresholds"><p class="field-note">personal priority, from less to more important</p>${priorityRows}</div><div class="time-row"><label>temporary topic<select id="temporary-topic"><option value="">none</option>${priorityTopics.map((topic) => `<option value="${topic}" ${activeTemp?.[0] === topic ? "selected" : ""}>${escapeHtml(topicLabel(topic))}</option>`).join("")}</select></label><label>boost<input id="temporary-boost" type="number" min="-20" max="20" value="${Number(activeTemp?.[1]?.boost || 10)}"></label><label>hours<input id="temporary-hours" type="number" min="1" max="336" value="24"></label></div><button class="button secondary full" data-action="save-rules">save rules</button><div class="eyebrow section-eyebrow">gaming countdowns</div><form id="game-event-form" class="password-form"><label>game<input id="game-event-game" placeholder="Warzone" required></label><label>event<input id="game-event-title" placeholder="season update" required></label><label>starts at<input id="game-event-starts" type="datetime-local" required></label><button class="button ghost-button full" type="submit">add countdown</button></form><div class="source-list">${gameEvents}</div></div></details>`;
 }
 
 function passwordCard() {
@@ -311,7 +317,9 @@ async function renderAppleSetup() {
 function renderHome() {
   document.title = "Pulse · quiet signals";
   const events = state.events.length ? state.events.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
+  const activeMode = state.context?.find((item) => item.kind === "mode")?.value?.mode || "quiet mode";
+  const urgent = state.events.filter((item) => ["critical", "high"].includes(item.priority)).length;
+  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">aiden · personal signal layer</span><h1>your pulse</h1><p>the few things worth opening.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">latest</span><h2>signals</h2></div><span class="muted">filtered for you</span></section><section class="event-list">${events}</section><div id="settings-anchor">${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}</div><p class="footer-note">quiet by default · private by design</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -334,6 +342,8 @@ async function renderDetail(eventId) {
 }
 
 function render() {
+  const nav = document.querySelector("#bottom-nav");
+  if (nav) nav.hidden = !state.authenticated;
   if (!state.authenticated) {
     app.innerHTML = loginView();
     return;
@@ -346,6 +356,7 @@ function render() {
   } else {
     renderHome();
   }
+  document.querySelectorAll("[data-nav]").forEach((item) => item.classList.toggle("active", item.dataset.nav === (location.pathname.startsWith("/integrations") ? "integrations" : "home")));
 }
 
 async function bootstrap() {
@@ -396,6 +407,16 @@ document.addEventListener("submit", async (event) => {
     } catch (error) { showToast(error.message, true); }
     return;
   }
+  if (event.target.id === "game-event-form") {
+    try {
+      const starts = new Date(document.querySelector("#game-event-starts").value);
+      if (Number.isNaN(starts.getTime())) throw new Error("choose a valid start time");
+      await api("/api/game-events", { method: "POST", body: JSON.stringify({ game: document.querySelector("#game-event-game").value, title: document.querySelector("#game-event-title").value, starts_at: starts.toISOString(), kind: "event" }) });
+      showToast("countdown added");
+      await loadAuthenticatedState(); renderHome();
+    } catch (error) { showToast(error.message, true); }
+    return;
+  }
   if (event.target.id !== "login-form") return;
   const password = new FormData(event.target).get("password");
   try {
@@ -418,6 +439,16 @@ document.addEventListener("click", async (event) => {
   const action = event.target.closest("[data-action]")?.dataset.action;
   if (!action) return;
   try {
+    if (action === "open-settings") {
+      if (location.pathname.startsWith("/integrations")) {
+        history.pushState({}, "", "/");
+        await loadAuthenticatedState();
+        renderHome();
+      }
+      const target = document.querySelector("#settings-anchor .rules-card");
+      if (target) { target.open = true; target.scrollIntoView({ behavior: "smooth", block: "start" }); }
+      return;
+    }
     if (action === "enable-alerts") await enableAlerts();
     if (action === "test-push") { const result = await api("/api/push/test", { method: "POST", body: "{}" }); showToast(result.delivery?.sent ? "test sent" : "test event saved; delivery is not configured"); }
     if (action === "source-click") { void api(`/api/events/${encodeURIComponent(event.target.closest("[data-event-id]")?.dataset.eventId || state.detail?.id)}/source-clicked`, { method: "POST", body: "{}" }); return; }
@@ -426,6 +457,7 @@ document.addEventListener("click", async (event) => {
     if (action === "reload") window.location.reload();
     if (action === "remind") { await api(`/api/events/${encodeURIComponent(event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id)}/remind`, { method: "POST", body: JSON.stringify({ minutes: 60 }) }); showToast("reminder set for one hour"); }
     if (action === "watch-purchase") { await api(`/api/purchases/${encodeURIComponent(event.target.closest("[data-purchase-id]")?.dataset.purchaseId)}/watch`, { method: "PATCH", body: JSON.stringify({ priority: "high" }) }); showToast("purchase watch enabled"); }
+    if (action === "delete-game-event") { await api(`/api/game-events/${encodeURIComponent(event.target.closest("[data-game-event-id]")?.dataset.gameEventId)}`, { method: "DELETE", body: "{}" }); await loadAuthenticatedState(); renderHome(); showToast("countdown removed"); }
     if (action === "mute") { await api(`/api/topics/${encodeURIComponent(event.target.closest("[data-topic]")?.dataset.topic || state.detail.topic)}/mute`, { method: "POST", body: JSON.stringify({ days: 7 }) }); showToast("topic muted for seven days"); }
     if (action === "follow" || action === "less-like") {
       const eventId = event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id;
@@ -450,7 +482,11 @@ document.addEventListener("click", async (event) => {
     if (action === "save-rules") {
       const thresholds = Object.fromEntries([...document.querySelectorAll("[data-threshold-topic]")].map((input) => [input.dataset.thresholdTopic, Number(input.value)]));
       const result = await api("/api/preferences", { method: "PUT", body: JSON.stringify({ quiet_start: document.querySelector("#quiet-start").value, quiet_end: document.querySelector("#quiet-end").value, topic_thresholds: thresholds }) });
-      state.preferences = result.preferences; showToast("rules saved");
+      const priorities = Object.fromEntries([...document.querySelectorAll("[data-priority-topic]")].map((input) => [input.dataset.priorityTopic, Number(input.value)]));
+      const topic = document.querySelector("#temporary-topic").value;
+      const temporary = topic ? {[topic]: { boost: Number(document.querySelector("#temporary-boost").value), expires_at: new Date(Date.now() + Number(document.querySelector("#temporary-hours").value) * 3600000).toISOString() }} : {};
+      await api("/api/priorities", { method: "POST", body: JSON.stringify({ personal_priorities: priorities, temporary_priority: temporary }) });
+      state.preferences = {...result.preferences, personal_priorities: priorities, temporary_priority: temporary}; showToast("rules saved");
     }
     if (action === "save-discovery") {
       let profiles;

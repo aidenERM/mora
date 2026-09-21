@@ -580,6 +580,15 @@ def create_app(test_config: dict | None = None) -> Flask:
         db().commit()
         return jsonify(event=item), 201
 
+    @app.delete("/api/game-events/<event_id>")
+    @require_auth
+    def game_event_delete(event_id: str):
+        cursor = db().execute("UPDATE game_events SET active=0,updated_at=? WHERE id=?", (_now().isoformat(), event_id))
+        if not cursor.rowcount:
+            return jsonify(error="not_found"), 404
+        db().commit()
+        return jsonify(ok=True)
+
     @app.get("/api/events/<event_id>")
     @require_auth
     def event_detail(event_id: str):

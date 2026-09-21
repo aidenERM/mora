@@ -24,8 +24,13 @@
     <main id="app" class="main" aria-live="polite">
       <section class="loading-state"><span class="loader"></span><p>opening your signal layer</p></section>
     </main>
+    <nav id="bottom-nav" class="bottom-nav" aria-label="Pulse navigation" hidden>
+      <a href="/" data-nav="home"><span class="nav-icon">⌂</span><span>signals</span></a>
+      <button type="button" data-action="open-settings"><span class="nav-icon">◌</span><span>settings</span></button>
+      <a href="/integrations" data-nav="integrations"><span class="nav-icon">⌘</span><span>connections</span></a>
+    </nav>
   </div>
   <div id="toast" class="toast" role="status"></div>
-  <script src="/static/app.js?v=pulse-0.2-intelligence-1" defer></script>
+  <script src="/static/app.js?v=pulse-0.2-phone-2" defer></script>
 </body>
 </html>

@@ -16,7 +16,7 @@ from pulse_app.config import load_config
 from pulse_app.rules import apply_preference_adjustments, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
-from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
+from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -257,6 +257,17 @@ def test_feed_parser():
     assert item["guid"] == "one"
 
 
+def test_default_high_value_sources_are_official_and_domain_scoped():
+    configured = {item["id"]: item for item in sources.configured_sources({})}
+    assert configured["openai-news"]["url"] == "https://openai.com/news/"
+    assert configured["openai-news"]["topic"] == "openai"
+    assert configured["discord-blog"]["url"] == "https://discord.com/blog"
+    assert configured["discord-blog"]["topic"] == "discord"
+    assert configured["rocket-league-news"]["url"] == "https://www.rocketleague.com/news"
+    assert configured["rocket-league-news"]["topic"] == "rocket_league"
+    assert all(configured[key]["trust"] == "primary" for key in ("openai-news", "discord-blog", "rocket-league-news"))
+
+
 def test_notification_route_is_exact_event_route():
     sw = Path(__file__).resolve().parents[1] / "static" / "sw.js"
     source = sw.read_text(encoding="utf-8")
@@ -398,6 +409,8 @@ def test_game_event_countdowns_emit_once_per_window(tmp_path):
     assert candidates[0]["metadata"]["countdown_window"] == "1h"
     assert game_event_candidates(conn, now) == []
     assert event["game"] == "Warzone"
+    expired = upsert_game_event(conn, "Warzone", "old event", (now - timedelta(hours=3)).isoformat(), "event")
+    assert all(item["id"].split(":")[0] != expired["id"] for item in game_event_candidates(conn, now))
 
 
 def test_purchase_watch_is_a_bounded_scoring_signal(tmp_path):
@@ -411,6 +424,20 @@ def test_purchase_watch_is_a_bounded_scoring_signal(tmp_path):
     candidate = {"topic": "purchase", "source_id": "mail", "score": 70, "metadata": {"lifecycle": {"purchase": {"id": purchase["id"], "watch_priority": "high"}}}}
     apply_preference_adjustments(candidate, {"personal_priorities": {}, "learned_topic_weights": {}, "learned_source_weights": {}, "followed_stories": {}})
     assert candidate["metadata"]["score_components"]["purchase_watch"] == 10
+
+
+def test_history_retention_prunes_old_low_value_rows_but_keeps_important_events(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    old = "2020-01-01T00:00:00+00:00"
+    base = {"source_id": "test", "source_kind": "rss", "topic": "watcher", "summary": "old", "body": "old", "url": "https://example.test", "relevant": True, "metadata": {}}
+    upsert_event(conn, {**base, "id": "old-low", "title": "old low", "canonical_key": "old-low", "published_at": old, "discovered_at": old, "last_seen_at": old, "score": 40, "priority": "low"})
+    upsert_event(conn, {**base, "id": "old-high", "topic": "apple", "title": "old high", "canonical_key": "old-high", "published_at": old, "discovered_at": old, "last_seen_at": old, "score": 95, "priority": "critical"})
+    result = prune_history(conn, {"HISTORY_RETENTION_DAYS": 90, "DECISION_RETENTION_DAYS": 30}, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert result["events"] == 1
+    assert get_event(conn, "old-low") is None
+    assert get_event(conn, "old-high") is not None
 
 
 def test_weather_alerts_cover_rain_storm_heat_cold_and_wind(tmp_path, monkeypatch):

@@ -548,6 +548,9 @@ def game_event_candidates(conn: sqlite3.Connection, now: datetime | None = None)
                 starts = starts.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             continue
+        if starts < now - timedelta(hours=2):
+            conn.execute("UPDATE game_events SET active=0,updated_at=? WHERE id=?", (utc_now(), item["id"]))
+            continue
         hours = (starts - now).total_seconds() / 3600
         window = "1h" if 0 <= hours <= 1.5 else "24h" if 22 <= hours <= 26 else ""
         if not window or window in item["notified_windows"]:
@@ -558,7 +561,7 @@ def game_event_candidates(conn: sqlite3.Connection, now: datetime | None = None)
             "title": f"{item['title']} starts in {remaining // 60}h" if remaining >= 60 else f"{item['title']} starts soon",
             "summary": f"{item['game']} {item['kind']} begins at {starts.astimezone(timezone.utc).isoformat()}.",
             "body": "A gaming event you configured is approaching.", "url": item["url"], "canonical_key": f"game-event:{item['id']}:{window}", "published_at": now.isoformat(),
-            "score": 86 if window == "1h" else 82, "priority": "high", "relevant": True,
+            "score": 96 if window == "1h" else 86, "priority": "critical" if window == "1h" else "high", "relevant": True,
             "metadata": {"source_trust": "primary", "game_event_id": item["id"], "countdown_window": window, "status_change": True, "entities": [item["game"]]},
         })
         conn.execute("UPDATE game_events SET notified_windows=?,updated_at=? WHERE id=?", (json.dumps([*item["notified_windows"], window], separators=(",", ":")), utc_now(), item["id"]))
@@ -880,6 +883,24 @@ def clear_learning(conn: sqlite3.Connection) -> None:
     )
     conn.execute("DELETE FROM event_actions WHERE action IN ('follow', 'less_like', 'useful', 'not_useful', 'too_late', 'opened', 'source_clicked', 'delivered')")
     conn.commit()
+
+
+def prune_history(conn: sqlite3.Connection, config: dict, now: datetime | None = None) -> dict:
+    """Keep recent history useful while bounding old forensic rows.
+
+    High/critical events remain longer because they are more likely to be useful
+    for personal history. Decisions/actions have their own shorter retention.
+    """
+    now = now or datetime.now(timezone.utc)
+    event_cutoff = (now - timedelta(days=int(config.get("HISTORY_RETENTION_DAYS", 365)))).replace(microsecond=0).isoformat()
+    decision_cutoff = (now - timedelta(days=int(config.get("DECISION_RETENTION_DAYS", 180)))).replace(microsecond=0).isoformat()
+    decisions = conn.execute("DELETE FROM event_decisions WHERE evaluated_at<?", (decision_cutoff,)).rowcount
+    actions = conn.execute("DELETE FROM event_actions WHERE created_at<?", (decision_cutoff,)).rowcount
+    observations = conn.execute("DELETE FROM event_observations WHERE observed_at<?", (event_cutoff,)).rowcount
+    developments = conn.execute("DELETE FROM event_developments WHERE discovered_at<?", (event_cutoff,)).rowcount
+    events = conn.execute("DELETE FROM events WHERE discovered_at<? AND priority IN ('low','normal') AND notified_at IS NULL", (event_cutoff,)).rowcount
+    conn.commit()
+    return {"events": events, "decisions": decisions, "actions": actions, "observations": observations, "developments": developments}
 
 
 def subscription_id(endpoint: str) -> str:
