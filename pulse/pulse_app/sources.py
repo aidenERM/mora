@@ -41,15 +41,6 @@ DEFAULT_SOURCES = [
         "keywords": ["warzone", "patch notes", "season", "weapon", "balance", "ricochet", "loadout", "battle royale", "verdansk"],
     },
     {
-        "id": "openai-news",
-        "kind": "url",
-        "label": "OpenAI News",
-        "url": "https://openai.com/news/",
-        "topic": "openai",
-        "trust": "primary",
-        "keywords": ["chatgpt", "openai", "release", "model", "security", "availability", "announcement"],
-    },
-    {
         "id": "discord-blog",
         "kind": "url",
         "label": "Discord Blog",
@@ -57,15 +48,6 @@ DEFAULT_SOURCES = [
         "topic": "discord",
         "trust": "primary",
         "keywords": ["discord", "security", "outage", "announcement", "patch", "release"],
-    },
-    {
-        "id": "rocket-league-news",
-        "kind": "url",
-        "label": "Rocket League News",
-        "url": "https://www.rocketleague.com/news",
-        "topic": "rocket_league",
-        "trust": "primary",
-        "keywords": ["rocket league", "patch", "season", "rlcs", "maintenance", "update"],
     },
 ]
 

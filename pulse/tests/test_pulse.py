@@ -259,13 +259,9 @@ def test_feed_parser():
 
 def test_default_high_value_sources_are_official_and_domain_scoped():
     configured = {item["id"]: item for item in sources.configured_sources({})}
-    assert configured["openai-news"]["url"] == "https://openai.com/news/"
-    assert configured["openai-news"]["topic"] == "openai"
     assert configured["discord-blog"]["url"] == "https://discord.com/blog"
     assert configured["discord-blog"]["topic"] == "discord"
-    assert configured["rocket-league-news"]["url"] == "https://www.rocketleague.com/news"
-    assert configured["rocket-league-news"]["topic"] == "rocket_league"
-    assert all(configured[key]["trust"] == "primary" for key in ("openai-news", "discord-blog", "rocket-league-news"))
+    assert configured["discord-blog"]["trust"] == "primary"
 
 
 def test_notification_route_is_exact_event_route():
