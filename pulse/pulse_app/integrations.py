@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import imaplib
 import json
 import logging
+import email
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from email.header import decode_header
+from xml.etree import ElementTree
 from urllib.parse import urlencode
 
 import requests
@@ -114,6 +119,28 @@ def normalize_location_payload(body: dict, max_age_minutes: int = 180) -> dict:
     }
 
 
+def normalize_icloud_calendar_event(event: dict) -> dict:
+    event = event if isinstance(event, dict) else {}
+    title = str(event.get("title") or event.get("summary") or "Calendar event").strip()[:240]
+    start = str(event.get("start") or "").strip()
+    end = str(event.get("end") or start).strip()
+    location = str(event.get("location") or "").strip()[:240]
+    uid = str(event.get("uid") or "").strip()[:180]
+    return {"event_id": uid, "title": title, "start": start, "end": end, "location": location, "calendar": str(event.get("calendar") or "")[:120], "status": str(event.get("status") or "confirmed").casefold()}
+
+
+def normalize_icloud_contact(contact: dict) -> dict:
+    contact = contact if isinstance(contact, dict) else {}
+    name = str(contact.get("name") or contact.get("fn") or "").strip()[:160]
+    emails = [str(value).strip()[:160] for value in contact.get("emails", []) if str(value).strip()][:5]
+    phones = [str(value).strip()[:60] for value in contact.get("phones", []) if str(value).strip()][:5]
+    return {"id": str(contact.get("id") or contact.get("uid") or "")[:180], "name": name, "emails": emails, "phones": phones, "importance": str(contact.get("importance") or "normal") if contact.get("importance") in {"important", "normal", "ignore"} else "normal"}
+
+
+def classify_apple_mail_message(message: dict) -> dict:
+    return classify_gmail_message(message)
+
+
 def prepare_event_candidate(candidate: dict, contexts: list[dict] | None = None) -> dict:
     """Apply conservative context elevation to an already-normalized event."""
     contexts = contexts or []
@@ -157,14 +184,14 @@ def provider_status(conn, config: dict) -> list[dict]:
             item = {**rows["google"], "provider": provider, "label": label}
         item["enabled"] = bool(item.get("enabled"))
         item["metadata"] = _safe_json(item.get("metadata"), {})
-        credential_provider = "google" if provider in {"gmail", "calendar"} else provider
+        credential_provider = "google" if provider in {"gmail", "calendar"} else "icloud" if provider in {"apple-calendar", "apple-contacts", "apple-mail"} else provider
         item["has_credentials"] = bool(conn.execute("SELECT 1 FROM integration_credentials WHERE provider=?", (credential_provider,)).fetchone())
         if provider in {"gmail", "calendar"}:
             item["configured"] = bool(config.get("GOOGLE_CLIENT_ID") and config.get("GOOGLE_CLIENT_SECRET"))
         elif provider == "discord":
             item["configured"] = bool(config.get("DISCORD_CLIENT_ID") and config.get("DISCORD_CLIENT_SECRET"))
         elif provider in {"apple-calendar", "apple-contacts", "apple-mail"}:
-            item["configured"] = bool(config.get("ICLOUD_APPLE_ID") and config.get("ICLOUD_APP_PASSWORD"))
+            item["configured"] = bool(item["has_credentials"] or (config.get("ICLOUD_APPLE_ID") and config.get("ICLOUD_APP_PASSWORD")))
         elif provider == "apple-music":
             item["configured"] = False
         elif provider == "aws-bedrock":
@@ -283,6 +310,152 @@ def _google_get(token: str, url: str, params: dict | None = None) -> dict:
     response = requests.get(url, headers={"Authorization": "Bearer " + token}, params=params or {}, timeout=15)
     response.raise_for_status()
     return response.json()
+
+
+def _icloud_credentials(conn, config: dict) -> dict:
+    stored = load_credential(conn, "icloud") or {}
+    apple_id = stored.get("apple_id") or config.get("ICLOUD_APPLE_ID", "")
+    app_password = stored.get("app_password") or config.get("ICLOUD_APP_PASSWORD", "")
+    if not apple_id or not app_password:
+        raise RuntimeError("Apple iCloud setup is required")
+    return {"apple_id": apple_id, "app_password": app_password}
+
+
+def _icloud_request(method: str, url: str, credentials: dict, body: str, headers: dict | None = None):
+    response = requests.request(method, url, data=body.encode("utf-8"), headers=headers or {}, auth=(credentials["apple_id"], credentials["app_password"]), timeout=20)
+    response.raise_for_status()
+    return response
+
+
+def _hrefs(response_text: str) -> list[str]:
+    try:
+        root = ElementTree.fromstring(response_text)
+    except ElementTree.ParseError:
+        return []
+    return [node.text.strip() for node in root.iter() if node.tag.endswith("href") and node.text and node.text.strip()]
+
+
+def _calendar_data(response_text: str) -> list[dict]:
+    try:
+        root = ElementTree.fromstring(response_text)
+    except ElementTree.ParseError:
+        return []
+    results = []
+    for node in root.iter():
+        if not node.tag.endswith("calendar-data") or not node.text:
+            continue
+        fields = {}
+        current = None
+        for raw in node.text.replace("\r\n ", "").replace("\r\n\t", "").splitlines():
+            if raw.startswith("BEGIN:VEVENT"):
+                fields = {}
+                current = fields
+                continue
+            if raw.startswith("END:VEVENT"):
+                if current is not None:
+                    results.append(current)
+                current = None
+                continue
+            if current is None or ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            key = key.split(";", 1)[0].upper()
+            if key in {"UID", "SUMMARY", "DTSTART", "DTEND", "LOCATION", "STATUS"}:
+                current[key] = value.strip()
+    return results
+
+
+def _sync_icloud_calendar(conn, config: dict, credentials: dict) -> dict:
+    propfind = """<?xml version="1.0"?><propfind xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><prop><current-user-principal/><c:calendar-home-set/></prop></propfind>"""
+    root_response = _icloud_request("PROPFIND", config["ICLOUD_CALDAV_URL"], credentials, propfind, {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
+    hrefs = _hrefs(root_response.text)
+    principal = next((href for href in hrefs if "principal" in href), "")
+    home = next((href for href in hrefs if "calend" in href.casefold()), "")
+    if principal and not home:
+        principal_response = _icloud_request("PROPFIND", principal, credentials, propfind, {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
+        home = next((href for href in _hrefs(principal_response.text) if "calend" in href.casefold()), "")
+    if not home:
+        raise RuntimeError("Apple Calendar home was not discovered")
+    if home.startswith("/"):
+        home = requests.compat.urljoin(config["ICLOUD_CALDAV_URL"], home)
+    collection_response = _icloud_request("PROPFIND", home, credentials, "<propfind xmlns=\"DAV:\"><prop><displayname/><resourcetype/></prop></propfind>", {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+    calendars = [href for href in _hrefs(collection_response.text) if href.rstrip("/") != home.rstrip("/")]
+    now = _now()
+    future = now + timedelta(days=14)
+    report = f"""<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range start="{now.strftime('%Y%m%dT%H%M%SZ')}" end="{future.strftime('%Y%m%dT%H%M%SZ')}"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"""
+    event_count = 0
+    for calendar_url in calendars[:30]:
+        if calendar_url.startswith("/"):
+            calendar_url = requests.compat.urljoin(config["ICLOUD_CALDAV_URL"], calendar_url)
+        try:
+            response = _icloud_request("REPORT", calendar_url, credentials, report, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        except requests.RequestException:
+            continue
+        for raw in _calendar_data(response.text):
+            normalized = normalize_icloud_calendar_event({"uid": raw.get("UID"), "title": raw.get("SUMMARY"), "start": raw.get("DTSTART"), "end": raw.get("DTEND"), "location": raw.get("LOCATION"), "status": raw.get("STATUS")})
+            if not normalized["start"] or normalized["status"] == "cancelled":
+                continue
+            set_context_signal(conn, "calendar", normalized, "apple-calendar", 0.98, normalized["end"] or normalized["start"])
+            event_count += 1
+    mark_success(conn, "apple-calendar", {"calendars": len(calendars), "events": event_count})
+    return {"calendars": len(calendars), "events": event_count}
+
+
+def _sync_icloud_contacts(conn, config: dict, credentials: dict) -> dict:
+    response = _icloud_request("PROPFIND", config["ICLOUD_CARDDAV_URL"], credentials, "<propfind xmlns=\"DAV:\" xmlns:card=\"urn:ietf:params:xml:ns:carddav\"><prop><current-user-principal/><card:addressbook-home-set/></prop></propfind>", {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"})
+    hrefs = _hrefs(response.text)
+    home = next((href for href in hrefs if "contact" in href.casefold() or "addressbook" in href.casefold()), "")
+    if not home:
+        raise RuntimeError("Apple Contacts home was not discovered")
+    if home.startswith("/"):
+        home = requests.compat.urljoin(config["ICLOUD_CARDDAV_URL"], home)
+    collection = _icloud_request("PROPFIND", home, credentials, "<propfind xmlns=\"DAV:\"><prop><displayname/><resourcetype/></prop></propfind>", {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+    addressbooks = [href for href in _hrefs(collection.text) if href.rstrip("/") != home.rstrip("/")]
+    mark_success(conn, "apple-contacts", {"addressbooks": len(addressbooks)})
+    return {"addressbooks": len(addressbooks)}
+
+
+def _apple_mail_event(item: dict, config: dict, preferences: dict, contexts: list[dict] | None = None) -> dict:
+    message_id = item["message_id"]
+    score, relevant, reason = score_item(item["topic"], item["subject"] or "Important iCloud Mail message", item["snippet"], item["keywords"], always_relevant=True, boost=max(0, item["score"] - 82))
+    event = {"id": "icloud-mail-" + hashlib.sha256(message_id.encode()).hexdigest()[:24], "source_id": "icloud-mail", "source_kind": "icloud-mail", "topic": item["topic"], "title": item["subject"] or "Important iCloud Mail message", "summary": item["snippet"] or "Important message detected in iCloud Mail.", "body": f"{reason}; sender: {item['sender']}", "url": "https://www.icloud.com/mail/", "canonical_key": "mail:" + message_id, "published_at": None, "score": max(score, item["score"]), "priority": "critical" if score >= 90 else "high", "relevant": relevant, "metadata": {"source_trust": "primary", "mail_message_id": message_id, "sender": item["sender"], "tracking_number": item.get("tracking_number", ""), "sources": [{"url": "https://www.icloud.com/mail/", "title": "iCloud Mail", "trust": "primary"}]}}
+    annotate_candidate(event, config.get("TRACKED_ENTITIES", []))
+    apply_preference_adjustments(event, preferences)
+    prepare_event_candidate(event, contexts)
+    return event
+
+
+def _sync_icloud_mail(conn, config: dict, credentials: dict) -> dict:
+    mailbox = imaplib.IMAP4_SSL(config["ICLOUD_IMAP_HOST"], 993)
+    try:
+        mailbox.login(credentials["apple_id"], credentials["app_password"])
+        mailbox.select("INBOX", readonly=True)
+        _, data = mailbox.uid("search", None, "SINCE", (_now() - timedelta(days=7)).strftime("%d-%b-%Y"))
+        uids = (data[0] or b"").split()[-25:]
+        preferences = get_preferences(conn, config)
+        created = 0
+        for uid in uids:
+            _, fetched = mailbox.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+            raw = next((part[1] for part in fetched if isinstance(part, tuple)), b"")
+            parsed = email.message_from_bytes(raw)
+            subject = str(parsed.get("Subject", ""))
+            try:
+                subject = "".join(str(part, enc or "utf-8") if isinstance(part, bytes) else str(part) for part, enc in decode_header(subject))
+            except (LookupError, UnicodeError):
+                pass
+            item = classify_apple_mail_message({"id": uid.decode(errors="ignore"), "snippet": subject, "payload": {"headers": [{"name": "Subject", "value": subject}, {"name": "From", "value": str(parsed.get("From", ""))}]}})
+            if not item.get("relevant"):
+                continue
+            item["message_id"] = "icloud:" + uid.decode(errors="ignore")
+            stored, was_created = upsert_event(conn, _apple_mail_event(item, config, preferences, active_context(conn)))
+            created += int(was_created)
+        mark_success(conn, "apple-mail", {"messages_checked": len(uids), "created": created})
+        return {"messages_checked": len(uids), "created": created}
+    finally:
+        try:
+            mailbox.logout()
+        except Exception:
+            pass
 
 
 def classify_gmail_message(message: dict) -> dict:
@@ -410,7 +583,15 @@ def sync_provider(conn, config: dict, provider: str) -> dict:
         return sync_google(conn, config)
     if provider == "discord":
         return sync_discord(conn, config)
-    if provider in {"apple", "apple-calendar", "apple-contacts", "apple-mail", "apple-music"}:
+    if provider in {"apple-calendar", "apple-contacts", "apple-mail"}:
+        credentials = _icloud_credentials(conn, config)
+        start_attempt(conn, provider)
+        if provider == "apple-calendar":
+            return _sync_icloud_calendar(conn, config, credentials)
+        if provider == "apple-contacts":
+            return _sync_icloud_contacts(conn, config, credentials)
+        return _sync_icloud_mail(conn, config, credentials)
+    if provider in {"apple", "apple-music"}:
         return {"context": len(active_context(conn))}
     if provider == "aws-bedrock":
         return {"configured": bool(config.get("BEDROCK_MODEL_ID"))}

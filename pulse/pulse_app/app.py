@@ -4,6 +4,7 @@ import json
 import hashlib
 import hmac
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -27,6 +28,7 @@ from .storage import (
     get_source_state,
     init_db,
     get_password_hash,
+    load_credential,
     learning_metrics,
     list_events,
     mark_clicked,
@@ -40,6 +42,7 @@ from .storage import (
     save_json_setting,
     save_source_state,
     save_preferences,
+    save_credential,
     save_subscription,
     set_reminder,
     clear_reminder,
@@ -320,8 +323,18 @@ def create_app(test_config: dict | None = None) -> Flask:
             mark_success(db(), provider, {"model": metadata.get("model"), "latency_ms": metadata.get("latency_ms")})
             db().commit()
             return jsonify(ok=True, metadata=metadata, integrations=provider_status(db(), config))
-        if provider in {"google", "gmail", "calendar", "discord"}:
-            has_credential = bool(db().execute("SELECT 1 FROM integration_credentials WHERE provider=?", ("google" if provider in {"gmail", "calendar"} else provider,)).fetchone())
+        if provider in {"google", "gmail", "calendar", "discord", "apple-calendar", "apple-contacts", "apple-mail"}:
+            credential_provider = "google" if provider in {"google", "gmail", "calendar"} else "icloud" if provider.startswith("apple-") else provider
+            has_credential = bool(db().execute("SELECT 1 FROM integration_credentials WHERE provider=?", (credential_provider,)).fetchone())
+            if provider.startswith("apple-") and has_credential:
+                try:
+                    result = sync_provider(db(), config, provider)
+                    db().commit()
+                    return jsonify(ok=True, result=result, integrations=provider_status(db(), config))
+                except Exception as exc:
+                    mark_failure(db(), provider, type(exc).__name__)
+                    db().commit()
+                    return jsonify(ok=False, error="apple_sync_failed", integrations=provider_status(db(), config)), 502
             return jsonify(ok=has_credential, configured=has_credential, integrations=provider_status(db(), config))
         return jsonify(ok=True, configured=True, integrations=provider_status(db(), config))
 
@@ -341,6 +354,35 @@ def create_app(test_config: dict | None = None) -> Flask:
         state = create_oauth_state(db(), "discord")
         return redirect(discord_authorization_url(config, state))
 
+    @app.get("/api/integrations/apple/setup")
+    @require_auth
+    def apple_setup_status():
+        credential = load_credential(db(), "icloud") or {}
+        return jsonify(configured=bool(credential.get("apple_id") and credential.get("app_password")))
+
+    @app.post("/api/integrations/apple/setup")
+    @require_auth
+    def apple_setup_save():
+        body = _json_body()
+        apple_id = str(body.get("apple_id", "")).strip()[:240]
+        app_password = str(body.get("app_password", "")).strip()[:240]
+        if "@" not in apple_id or len(app_password) < 8:
+            return jsonify(error="apple_id_and_app_specific_password_required"), 400
+        save_credential(db(), "icloud", {"apple_id": apple_id, "app_password": app_password})
+        for provider in ("apple-calendar", "apple-contacts", "apple-mail"):
+            save_integration(db(), provider, PROVIDERS[provider], enabled=False, connection_state="needs_setup", authorization_state="authorized", last_error="")
+        db().commit()
+        return jsonify(ok=True, configured=True, integrations=provider_status(db(), config))
+
+    @app.post("/api/integrations/apple/disconnect")
+    @require_auth
+    def apple_disconnect():
+        db().execute("DELETE FROM integration_credentials WHERE provider='icloud'")
+        for provider in ("apple-calendar", "apple-contacts", "apple-mail"):
+            disconnect(db(), provider)
+        db().commit()
+        return jsonify(ok=True, integrations=provider_status(db(), config))
+
     @app.get("/api/integrations/<provider>/callback")
     def integration_callback(provider: str):
         if provider not in {"google", "discord"}:
@@ -358,6 +400,25 @@ def create_app(test_config: dict | None = None) -> Flask:
     @require_auth
     def context_status():
         return jsonify(context=active_context(db()))
+
+    def shortcut_token():
+        stored = load_credential(db(), "shortcut") or {}
+        return str(stored.get("token") or config.get("SHORTCUT_TOKEN") or "")
+
+    @app.get("/api/shortcut/setup")
+    @require_auth
+    def shortcut_setup():
+        token = shortcut_token()
+        if not token:
+            return jsonify(error="shortcut_not_configured"), 503
+        return jsonify(endpoint=config["APP_URL"] + "/api/shortcut/context", token=token)
+
+    @app.post("/api/shortcut/token/rotate")
+    @require_auth
+    def shortcut_rotate():
+        token = secrets.token_urlsafe(32)
+        save_credential(db(), "shortcut", {"token": token})
+        return jsonify(ok=True, endpoint=config["APP_URL"] + "/api/shortcut/context", token=token)
 
     @app.post("/api/location")
     @require_auth
@@ -706,7 +767,8 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.post("/api/shortcut/check")
     def shortcut_check():
-        if not config["SHORTCUT_TOKEN"] or request.headers.get("X-Pulse-Shortcut-Token") != config["SHORTCUT_TOKEN"]:
+        token = shortcut_token()
+        if not token or request.headers.get("X-Pulse-Shortcut-Token") != token:
             return jsonify(error="shortcut_not_configured"), 403
         conn = db()
         prefs = get_preferences(conn, config)
@@ -720,7 +782,8 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.post("/api/shortcut/context")
     def shortcut_context():
-        if not config["SHORTCUT_TOKEN"] or request.headers.get("X-Pulse-Shortcut-Token") != config["SHORTCUT_TOKEN"]:
+        token = shortcut_token()
+        if not token or request.headers.get("X-Pulse-Shortcut-Token") != token:
             return jsonify(error="shortcut_not_configured"), 403
         try:
             payload = normalize_companion_payload(_json_body())

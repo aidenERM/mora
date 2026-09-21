@@ -289,11 +289,19 @@ function renderIntegrations() {
   const locationText = location ? `updated ${formatDate(location.observed_at)}` : "not shared";
   const cards = `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon">G</div><div><h2>Google</h2>${badge(google)}</div></div>${google.connection_state === "connected" ? `<span class="provider-check">✓</span>` : ""}</div><div class="service-list">${service(gmail, "Gmail")}${service(calendar, "Calendar")}${service(google, "Contacts")}</div><div class="provider-actions">${google.connection_state === "connected" ? `${sync("google")}${disconnect("google")}` : connect("google", "connect Google")}</div></section>`
     + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon discord-icon">D</div><div><h2>Discord</h2>${badge(discord)}</div></div>${discord.connection_state === "connected" ? `<span class="provider-check">✓</span>` : ""}</div><p class="provider-note">Account and server access only. Pulse does not read general chat history.</p><div class="provider-actions">${discord.connection_state === "connected" ? disconnect("discord") : connect("discord", "connect Discord")}</div></section>`
-    + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon apple-icon">⌘</div><div><h2>Apple</h2>${badge(apple.connection_state === "connected" ? apple : appleCalendar)}</div></div></div><div class="service-list">${service(appleCalendar, "Calendar")}${service(appleContacts, "Contacts")}${service(appleMail, "Mail")}${service(appleMusic, "Music")}${service(apple, "Shortcuts / context")}</div><div class="provider-actions"><button class="button" data-action="apple-setup">set up Apple access</button><button class="button secondary" data-action="pair-companion">pair iPhone</button></div><p class="provider-note">Use an Apple app-specific password for Calendar, Contacts, and Mail. Music stays optional.</p></section>`
+    + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon apple-icon">⌘</div><div><h2>Apple</h2>${badge(apple.connection_state === "connected" ? apple : appleCalendar)}</div></div></div><div class="service-list">${service(appleCalendar, "Calendar")}${service(appleContacts, "Contacts")}${service(appleMail, "Mail")}${service(appleMusic, "Music")}${service(apple, "Shortcuts / context")}</div><div class="provider-actions"><a class="button" href="/integrations/apple">set up Apple access</a><button class="button secondary" data-action="pair-companion">pair iPhone</button></div><p class="provider-note">Use an Apple app-specific password for Calendar, Contacts, and Mail. Music stays optional.</p></section>`
     + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon aws-icon">AI</div><div><h2>AWS AI</h2>${badge(aws)}</div></div></div><p class="provider-note">GPT-5.6 Luna · ${escapeHtml(aws.metadata?.region || "us-east-1")}</p><div class="provider-actions"><button class="button secondary" data-action="integration-test" data-provider="aws-bedrock">test Luna</button></div><details class="provider-details"><summary>technical details</summary><p>model ${escapeHtml(aws.metadata?.model || state.config?.bedrock_model_id || "configured")}. Deterministic scoring remains active if AI fails.</p></details></section>`
     + `<section class="provider-card"><div class="provider-card-top"><div><div class="provider-icon location-icon">⌖</div><div><h2>Location context</h2><span class="provider-status ${location ? "connected" : "setup"}"><span>${location ? "✓" : "○"}</span>${location ? "Active" : "Not shared"}</span></div></div></div><p class="provider-note">Coarse, temporary location only. ${escapeHtml(locationText)}.</p><div class="provider-actions"><button class="button" data-action="location-permission">use current location</button>${location ? `<button class="button ghost-button" data-action="clear-location">clear</button>` : ""}</div></section>`;
   const contextRows = (state.context || []).filter((entry) => entry.kind !== "location").map((entry) => `<div class="diagnostic-row"><span>${escapeHtml(entry.kind)}<small>${escapeHtml(entry.source)}</small></span><strong>${escapeHtml(JSON.stringify(entry.value))}</strong></div>`).join("") || `<p class="fine-print">no other context has been received</p>`;
   app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect the context Pulse can use. provider details stay simple; technical diagnostics are tucked away.</p>${integrationSetupBanner()}<div class="provider-grid">${cards}</div><details class="quality-card diagnostics"><summary>debug and active context</summary>${contextRows}</details><a class="button ghost-button full" href="/">back to history</a>`;
+}
+
+async function renderAppleSetup() {
+  document.title = "Pulse · Apple setup";
+  let shortcut = null;
+  try { shortcut = await api("/api/shortcut/setup"); } catch (_) { /* show setup without token if unavailable */ }
+  const tokenField = shortcut ? `<label>Authorization token<input id="shortcut-token" value="${escapeHtml(shortcut.token)}" readonly></label><div class="provider-actions"><button class="button secondary" data-action="copy-text" data-copy-target="shortcut-token">copy token</button><button class="button ghost-button" data-action="rotate-shortcut">rotate token</button></div>` : `<p class="provider-note">Shortcut token is not configured on the server yet.</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">Apple and phone context</div><h1>set up Apple</h1></div><a class="icon-button" href="/integrations">←</a></section><p class="lede">Use an Apple app-specific password. Pulse stores it encrypted and never sends it to the browser or AI.</p><section class="provider-card"><form id="apple-setup-form" class="password-form"><label>Apple / iCloud email<input id="apple-id" type="email" autocomplete="username" placeholder="you@icloud.com" required></label><label>app-specific password<input id="apple-app-password" type="password" autocomplete="new-password" placeholder="xxxx-xxxx-xxxx-xxxx" minlength="8" required></label><button class="button" type="submit">save Apple access</button></form><p class="provider-note">Create the app-specific password at Apple ID account settings. Never use your main Apple ID password.</p></section><section class="provider-card"><div class="eyebrow">phone context Shortcut</div><h2>one simple Shortcut</h2><p class="provider-note">Add a Get Contents of URL action using this endpoint, JSON body with mode/confidence/signals, and the token below. The included template is optional.</p><label>Pulse URL<input value="${escapeHtml(shortcut?.endpoint || `${location.origin}/api/shortcut/context`)}" readonly></label>${tokenField}<div class="provider-actions"><button class="button secondary" data-action="shortcut-test">test Shortcut endpoint</button></div><p class="provider-note">Minimum automations: arrive/leave home, arrive/leave school, and Sleep Focus on/off.</p></section><section class="provider-card"><div class="eyebrow">Apple services</div><div class="provider-actions"><button class="button secondary" data-action="integration-test" data-provider="apple-calendar">test Calendar</button><button class="button secondary" data-action="integration-test" data-provider="apple-contacts">test Contacts</button><button class="button secondary" data-action="integration-test" data-provider="apple-mail">test Mail</button></div><p class="provider-note">These use the same encrypted Apple credential and only mark a service connected after a real protocol check/sync succeeds.</p></section>`;
 }
 
 function renderHome() {
@@ -327,7 +335,8 @@ function render() {
   if (location.pathname.startsWith("/event/")) {
     renderDetail(decodeURIComponent(location.pathname.slice("/event/".length)));
   } else if (location.pathname.startsWith("/integrations")) {
-    renderIntegrations();
+    if (location.pathname.startsWith("/integrations/apple")) renderAppleSetup();
+    else renderIntegrations();
   } else {
     renderHome();
   }
@@ -371,6 +380,14 @@ document.addEventListener("submit", async (event) => {
       const message = { invalid_current_password: "current passphrase is incorrect", password_confirmation_mismatch: "the new passphrases do not match", password_too_short: "use at least 8 characters", password_too_long: "use 256 characters or fewer", password_unchanged: "choose a different passphrase" }[error.message] || error.message;
       showToast(message, true);
     }
+    return;
+  }
+  if (event.target.id === "apple-setup-form") {
+    try {
+      await api("/api/integrations/apple/setup", { method: "POST", body: JSON.stringify({ apple_id: document.querySelector("#apple-id").value, app_password: document.querySelector("#apple-app-password").value }) });
+      showToast("Apple access saved securely");
+      await loadAuthenticatedState(); renderAppleSetup();
+    } catch (error) { showToast(error.message, true); }
     return;
   }
   if (event.target.id !== "login-form") return;
@@ -474,6 +491,22 @@ document.addEventListener("click", async (event) => {
       await loadAuthenticatedState(); renderIntegrations(); showToast("location context cleared");
     }
     if (action === "apple-setup") showToast("Apple web access needs an app-specific password in the secure server environment.");
+    if (action === "copy-text") {
+      const input = document.querySelector(`#${event.target.closest("[data-copy-target]")?.dataset.copyTarget}`);
+      if (input) { await navigator.clipboard.writeText(input.value); showToast("copied"); }
+    }
+    if (action === "rotate-shortcut") {
+      if (!window.confirm("Rotate the Shortcut token? The old token will stop working.")) return;
+      await api("/api/shortcut/token/rotate", { method: "POST", body: "{}" });
+      renderAppleSetup(); showToast("Shortcut token rotated");
+    }
+    if (action === "shortcut-test") {
+      const setup = await api("/api/shortcut/setup");
+      const response = await fetch("/api/shortcut/context", { method: "POST", headers: { "Content-Type": "application/json", "X-Pulse-Shortcut-Token": setup.token }, body: JSON.stringify({ mode: "unknown", confidence: 0.6, signals: { shortcut: { test: "true" } } }) });
+      if (!response.ok) throw new Error("Shortcut test failed");
+      showToast("Shortcut connected ✓");
+      await loadAuthenticatedState(); renderAppleSetup();
+    }
   } catch (error) {
     showToast(error.message, true);
   }

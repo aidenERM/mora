@@ -15,7 +15,7 @@ from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.integrations import classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_location_payload, prepare_event_candidate
+from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
 from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record
 
 
@@ -129,6 +129,24 @@ def test_google_authorization_requests_enabled_apis():
     assert "https://www.googleapis.com/auth/gmail.readonly" in query["scope"][0]
     assert "https://www.googleapis.com/auth/calendar.readonly" in query["scope"][0]
     assert "https://www.googleapis.com/auth/contacts.readonly" in query["scope"][0]
+
+
+def test_icloud_normalization_reuses_mail_classification():
+    calendar = normalize_icloud_calendar_event({"uid": "event-1", "summary": "School meeting", "start": "2026-09-21T14:00:00Z", "end": "2026-09-21T15:00:00Z", "location": "School", "calendar": "Family"})
+    contact = normalize_icloud_contact({"uid": "contact-1", "fn": "Aiden", "emails": ["aiden@example.test"], "phones": ["+57 300"], "importance": "important"})
+    mail = classify_apple_mail_message({"id": "mail-1", "snippet": "Your package is out for delivery", "payload": {"headers": [{"name": "Subject", "value": "Package update"}, {"name": "From", "value": "store@example.test"}]}})
+    assert calendar["event_id"] == "event-1" and calendar["calendar"] == "Family"
+    assert contact["name"] == "Aiden" and contact["importance"] == "important"
+    assert mail["topic"] == "package"
+
+
+def test_shortcut_setup_and_authentication(tmp_path):
+    client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
+    login(client)
+    setup = client.get("/api/shortcut/setup")
+    assert setup.status_code == 200 and setup.json["endpoint"].endswith("/api/shortcut/context")
+    assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": setup.json["token"]}).status_code == 200
+    assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
 
 
 def test_bedrock_structured_validation(monkeypatch):

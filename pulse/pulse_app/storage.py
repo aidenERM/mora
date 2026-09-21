@@ -300,7 +300,17 @@ def load_credential(conn: sqlite3.Connection, provider: str) -> dict | None:
 
 
 def set_context_signal(conn: sqlite3.Connection, kind: str, value: dict, source: str, confidence: float, expires_at: str | None = None) -> str:
-    marker = hashlib.sha256((kind + ":" + source + ":" + json.dumps(value, sort_keys=True)).encode()).hexdigest()[:24]
+    if kind == "calendar":
+        # Google and iCloud observations of the same calendar item share one
+        # context identity instead of producing duplicate active signals.
+        calendar_key = {
+            "title": str(value.get("title", "")).casefold().strip(),
+            "start": str(value.get("start", "")).strip(),
+            "location": str(value.get("location", "")).casefold().strip(),
+        }
+        marker = hashlib.sha256((kind + ":" + json.dumps(calendar_key, sort_keys=True)).encode()).hexdigest()[:24]
+    else:
+        marker = hashlib.sha256((kind + ":" + source + ":" + json.dumps(value, sort_keys=True)).encode()).hexdigest()[:24]
     conn.execute(
         "INSERT INTO context_signals(id,kind,value_json,source,confidence,observed_at,expires_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET value_json=excluded.value_json,confidence=excluded.confidence,observed_at=excluded.observed_at,expires_at=excluded.expires_at",
         (marker, kind, json.dumps(value, separators=(",", ":")), source, max(0.0, min(1.0, float(confidence))), utc_now(), expires_at),
