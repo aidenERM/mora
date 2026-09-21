@@ -30,6 +30,8 @@ from .storage import (
     learning_metrics,
     list_events,
     mark_clicked,
+    mark_notification_suppressed,
+    mark_notified,
     record_event_action,
     runtime_config,
     save_password_hash,
@@ -446,7 +448,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     def test_push():
         event = create_manual_event(db(), config["APP_URL"], "Pulse test received", "Tap this notification to open the exact event page.")
         result = send_payload(db(), config, _payload(config, event))
-        db().execute("UPDATE events SET notified_at=? WHERE id=?", (_now().isoformat(), event["id"]))
+        mark_notified(db(), event["id"])
         db().commit()
         return jsonify(event=event, delivery=result)
 
@@ -496,14 +498,16 @@ def create_app(test_config: dict | None = None) -> Flask:
         db().commit()
         delivered = False
         if created:
-            allowed, _reason = should_notify(event, preferences)
+            allowed, reason = should_notify(event, preferences, _now(), config, db())
             if allowed:
                 result = send_payload(db(), config, _payload(config, event))
+                mark_notified(db(), event["id"])
                 if result.get("sent", 0):
                     record_event_action(db(), event["id"], "delivered", str(result["sent"]))
                     delivered = True
-                db().execute("UPDATE events SET notified_at=? WHERE id=?", (_now().isoformat(), event["id"]))
-                db().commit()
+            elif reason not in {"quiet hours", "topic or event cooldown"}:
+                mark_notification_suppressed(db(), event["id"], reason)
+            db().commit()
         return jsonify(ok=True, created=created, delivered=delivered, event_id=event["id"])
 
     @app.get("/manifest.webmanifest")

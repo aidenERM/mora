@@ -7,16 +7,16 @@ from datetime import datetime, timezone
 from .config import load_config
 from .discovery import collect_discovery_candidates
 from .push import send_payload
-from .rules import apply_preference_adjustments, should_notify
+from .rules import apply_preference_adjustments, notification_copy, should_notify
 from .sources import collect_candidates
-from .storage import connect, due_reminders, get_preferences, init_db, mark_notified, mark_reminded, pending_events, record_event_action, runtime_config, upsert_event
+from .storage import connect, due_reminders, get_preferences, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, record_event_action, runtime_config, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
 
 
 def _payload(config: dict, event: dict, reminder: bool = False) -> dict:
-    title = ("Reminder · " if reminder else "") + event["title"]
-    body = event.get("summary") or event.get("body") or "Open Pulse for details."
+    title, body = notification_copy(event)
+    title = ("Reminder · " if reminder else "") + title
     return {
         "id": event["id"],
         "title": title[:120],
@@ -30,8 +30,9 @@ def _payload(config: dict, event: dict, reminder: bool = False) -> dict:
 
 def _send_event(conn, config: dict, event: dict, reminder: bool = False) -> dict:
     result = send_payload(conn, config, _payload(config, event, reminder))
-    mark_notified(conn, event["id"])
-    if result.get("sent", 0):
+    if not reminder:
+        mark_notified(conn, event["id"])
+    if result.get("sent", 0) and not reminder:
         record_event_action(conn, event["id"], "delivered", str(result.get("sent", 0)))
     conn.commit()
     return result
@@ -60,13 +61,21 @@ def run_once(config: dict | None = None) -> dict:
             inserted += int(created)
             if created:
                 conn.commit()
-        for event in pending_events(conn):
-            allowed, reason = should_notify(event, preferences)
+        sent_this_run = 0
+        now = datetime.now(timezone.utc)
+        for event in pending_events(conn, 100):
+            allowed, reason = should_notify(event, preferences, now, runtime, conn)
             if not allowed:
+                if reason not in {"quiet hours", "topic or event cooldown"}:
+                    mark_notification_suppressed(conn, event["id"], reason)
+                    conn.commit()
                 continue
+            if sent_this_run >= int(runtime.get("MAX_NOTIFICATIONS_PER_RUN", 2)):
+                break
             try:
                 result = _send_event(conn, config, event)
                 notifications += int(result.get("sent", 0))
+                sent_this_run += 1
                 errors.extend(result.get("errors", []))
                 LOGGER.info("event %s sent=%s removed=%s", event["id"], result.get("sent", 0), result.get("removed", 0))
             except Exception as exc:

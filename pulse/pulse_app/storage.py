@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import DEFAULT_SEARCH_PROFILES, DEFAULT_THRESHOLDS, DEFAULT_TRACKED_ENTITIES
+from .rules import clean_event_summary, clean_event_title, event_fingerprint, events_similar, materially_changed
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -48,11 +49,16 @@ CREATE TABLE IF NOT EXISTS events (
     remind_at TEXT,
     clicked_at TEXT,
     created_from TEXT NOT NULL DEFAULT 'source',
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    content_hash TEXT NOT NULL DEFAULT '',
+    notified_hash TEXT NOT NULL DEFAULT '',
+    notification_pending INTEGER NOT NULL DEFAULT 0,
+    notification_count INTEGER NOT NULL DEFAULT 0,
+    last_notification_at TEXT,
+    notification_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_events_recent ON events(discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic, discovered_at DESC);
-CREATE INDEX IF NOT EXISTS idx_events_pending ON events(notified_at, suppress_notification, score);
 CREATE TABLE IF NOT EXISTS event_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL,
@@ -82,8 +88,34 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
     try:
         conn.executescript(SCHEMA)
         event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
-        if "metadata" not in event_columns:
-            conn.execute("ALTER TABLE events ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        migrations = {
+            "metadata": "TEXT NOT NULL DEFAULT '{}'",
+            "content_hash": "TEXT NOT NULL DEFAULT ''",
+            "notified_hash": "TEXT NOT NULL DEFAULT ''",
+            "notification_pending": "INTEGER NOT NULL DEFAULT 0",
+            "notification_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_notification_at": "TEXT",
+            "notification_reason": "TEXT NOT NULL DEFAULT ''",
+        }
+        added = False
+        for name, definition in migrations.items():
+            if name not in event_columns:
+                conn.execute(f"ALTER TABLE events ADD COLUMN {name} {definition}")
+                added = True
+        conn.execute("DROP INDEX IF EXISTS idx_events_pending")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_pending ON events(notification_pending, suppress_notification, score)")
+        if added:
+            # Existing unreviewed rows must remain history, not become a push storm
+            # on the first stricter worker run.
+            conn.execute("UPDATE events SET notification_pending=0")
+        for row in conn.execute("SELECT * FROM events WHERE content_hash='' OR (notified_at IS NOT NULL AND notification_count=0)").fetchall():
+            item = event_from_row(row)
+            fingerprint = event_fingerprint(item)
+            notified = 1 if item.get("notified_at") else 0
+            conn.execute(
+                "UPDATE events SET content_hash=?, notified_hash=?, notification_count=?, last_notification_at=COALESCE(last_notification_at,?) WHERE id=?",
+                (fingerprint, fingerprint if notified else "", notified, item.get("notified_at"), item["id"]),
+            )
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('preferences',?)", (json.dumps({}),))
         if initial_password_hash:
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('password_hash',?)", (initial_password_hash,))
@@ -123,6 +155,25 @@ def passive_topic_weights(conn: sqlite3.Connection) -> dict:
     return weights
 
 
+def passive_source_weights(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        """SELECT events.source_id,
+                  SUM(CASE WHEN event_actions.action='delivered' THEN 1 ELSE 0 END) AS delivered,
+                  SUM(CASE WHEN event_actions.action='opened' THEN 1 ELSE 0 END) AS opened
+           FROM event_actions JOIN events ON events.id=event_actions.event_id
+           WHERE event_actions.action IN ('delivered','opened')
+           GROUP BY events.source_id"""
+    ).fetchall()
+    weights = {}
+    for row in rows:
+        delivered = int(row["delivered"] or 0)
+        if delivered < 3:
+            continue
+        ratio = int(row["opened"] or 0) / delivered
+        weights[row["source_id"]] = max(-6, min(6, round((ratio - 0.5) * 12)))
+    return weights
+
+
 def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     row = conn.execute("SELECT value FROM settings WHERE key='preferences'").fetchone()
     stored = {}
@@ -139,6 +190,7 @@ def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
         base[key] = stored.get(key, {}) if isinstance(stored.get(key, {}), dict) else {}
     stored_weights = stored.get("learned_topic_weights", {}) if isinstance(stored.get("learned_topic_weights", {}), dict) else {}
     base["learned_topic_weights"] = {**passive_topic_weights(conn), **stored_weights}
+    base["learned_source_weights"] = passive_source_weights(conn)
     return base
 
 
@@ -301,7 +353,7 @@ def event_from_row(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
     item = dict(row)
-    for key in ("relevant", "suppress_notification"):
+    for key in ("relevant", "suppress_notification", "notification_pending"):
         item[key] = bool(item[key])
     try:
         item["metadata"] = json.loads(item.get("metadata") or "{}")
@@ -326,42 +378,105 @@ def list_events(conn: sqlite3.Connection, limit: int = 30, topic: str | None = N
 def pending_events(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
     rows = conn.execute(
         """SELECT * FROM events
-           WHERE notified_at IS NULL AND suppress_notification=0 AND relevant=1
-           ORDER BY score DESC, discovered_at ASC LIMIT ?""",
+           WHERE notification_pending=1 AND suppress_notification=0 AND relevant=1
+           ORDER BY score DESC, discovered_at DESC LIMIT ?""",
         (limit,),
     ).fetchall()
     return [event_from_row(row) for row in rows]
 
 
+def _merge_metadata(old: dict, new: dict) -> dict:
+    merged = {**(old or {}), **(new or {})}
+    for key in ("sources", "entities", "entity_names"):
+        values = []
+        for item in ((old or {}).get(key) or []) + ((new or {}).get(key) or []):
+            marker = json.dumps(item, sort_keys=True) if isinstance(item, dict) else str(item)
+            if marker not in {json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value) for value in values}:
+                values.append(item)
+        if values:
+            merged[key] = values
+    if len(merged.get("sources") or []) > 1:
+        merged["verification"] = "cross_source"
+    merged["source_count"] = len(merged.get("sources") or [])
+    if old.get("safety_critical") or new.get("safety_critical"):
+        merged["safety_critical"] = True
+    return merged
+
+
+def _find_similar_event(conn: sqlite3.Connection, event: dict) -> dict | None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM events WHERE topic=? AND discovered_at>=? ORDER BY discovered_at DESC LIMIT 100",
+        (event.get("topic"), cutoff),
+    ).fetchall()
+    for row in rows:
+        existing = event_from_row(row)
+        if existing and existing.get("canonical_key") != event.get("canonical_key") and events_similar(existing, event):
+            return existing
+    return None
+
+
 def upsert_event(conn: sqlite3.Connection, event: dict) -> tuple[dict, bool]:
     now = utc_now()
     event = {**event, "discovered_at": event.get("discovered_at") or now, "last_seen_at": now}
+    event["title"] = clean_event_title(event)
+    event["summary"] = clean_event_summary(event)
+    event["body"] = str(event.get("body") or "")[:700]
     existing = conn.execute("SELECT * FROM events WHERE canonical_key=?", (event["canonical_key"],)).fetchone()
+    if existing is None:
+        similar = _find_similar_event(conn, event)
+        if similar:
+            event["canonical_key"] = similar["canonical_key"]
+            event["id"] = similar["id"]
+            event["metadata"] = _merge_metadata(similar.get("metadata") or {}, event.get("metadata") or {})
+            existing = conn.execute("SELECT * FROM events WHERE id=?", (similar["id"],)).fetchone()
+    fingerprint = event_fingerprint(event)
     if existing:
+        old = event_from_row(existing)
+        meaningful = materially_changed(old, event)
+        if old.get("notification_count", 0) == 0:
+            pending = int(bool(event["relevant"]) and not event.get("suppress_notification", False))
+        elif meaningful and event["relevant"] and not event.get("suppress_notification", False):
+            pending = 1
+        elif not event["relevant"] or event.get("suppress_notification", False):
+            pending = 0
+        else:
+            pending = int(old.get("notification_pending", False))
         conn.execute(
-            """UPDATE events SET title=?,summary=?,body=?,url=?,published_at=?,last_seen_at=?,score=?,priority=?,relevant=?,suppress_notification=?,metadata=?
+            """UPDATE events SET title=?,summary=?,body=?,url=?,published_at=?,last_seen_at=?,score=?,priority=?,relevant=?,suppress_notification=?,metadata=?,content_hash=?,notification_pending=?,notification_reason=?
                WHERE canonical_key=?""",
             (
                 event["title"], event["summary"], event["body"], event["url"], event.get("published_at"),
-                now, event["score"], event["priority"], int(event["relevant"]), int(event.get("suppress_notification", False)), json.dumps(event.get("metadata") or {}, separators=(",", ":")), event["canonical_key"],
+                now, event["score"], event["priority"], int(event["relevant"]), int(event.get("suppress_notification", False)), json.dumps(event.get("metadata") or {}, separators=(",", ":")), fingerprint, pending, "" if pending else old.get("notification_reason", ""), event["canonical_key"],
             ),
         )
         return event_from_row(conn.execute("SELECT * FROM events WHERE canonical_key=?", (event["canonical_key"],)).fetchone()), False
     conn.execute(
-        """INSERT INTO events(id,source_id,source_kind,topic,title,summary,body,url,canonical_key,published_at,discovered_at,last_seen_at,score,priority,relevant,suppress_notification,created_from,metadata)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO events(id,source_id,source_kind,topic,title,summary,body,url,canonical_key,published_at,discovered_at,last_seen_at,score,priority,relevant,suppress_notification,created_from,metadata,content_hash,notification_pending)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             event["id"], event["source_id"], event["source_kind"], event["topic"], event["title"],
             event.get("summary", ""), event.get("body", ""), event["url"], event["canonical_key"],
             event.get("published_at"), event["discovered_at"], now, event["score"], event["priority"],
-            int(event["relevant"]), int(event.get("suppress_notification", False)), event.get("created_from", "source"), json.dumps(event.get("metadata") or {}, separators=(",", ":")),
+            int(event["relevant"]), int(event.get("suppress_notification", False)), event.get("created_from", "source"), json.dumps(event.get("metadata") or {}, separators=(",", ":")), fingerprint, int(bool(event["relevant"]) and not event.get("suppress_notification", False)),
         ),
     )
     return event_from_row(conn.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()), True
 
 
 def mark_notified(conn: sqlite3.Connection, event_id: str) -> None:
-    conn.execute("UPDATE events SET notified_at=? WHERE id=?", (utc_now(), event_id))
+    now = utc_now()
+    conn.execute(
+        "UPDATE events SET notified_at=COALESCE(notified_at,?),last_notification_at=?,notification_pending=0,notification_count=notification_count+1,notified_hash=content_hash,notification_reason=? WHERE id=?",
+        (now, now, "sent", event_id),
+    )
+
+
+def mark_notification_suppressed(conn: sqlite3.Connection, event_id: str, reason: str) -> None:
+    conn.execute(
+        "UPDATE events SET notification_pending=0,notification_reason=? WHERE id=?",
+        (reason[:120], event_id),
+    )
 
 
 def mark_clicked(conn: sqlite3.Connection, event_id: str) -> None:

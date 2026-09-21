@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -161,6 +162,7 @@ def _source_item(source: dict, item: dict, initial_suppress: bool = False, score
         "priority": "critical" if score >= 90 else "high" if score >= 80 else "normal" if score >= 65 else "low",
         "suppress_notification": initial_suppress,
         "metadata": {
+            "source_label": source.get("label", source["id"]),
             "source_trust": source.get("trust", "reliable_secondary"),
             "confidence": "confirmed" if source.get("trust") == "primary" else "likely",
             "verification": "direct_watcher",
@@ -215,7 +217,12 @@ def _github_candidates(conn, source: dict, config: dict) -> list[dict]:
         keys.append(key)
         if key in seen and not initializing:
             continue
-        candidates.append(_source_item(source, {"title": release.get("name") or release.get("tag_name") or "GitHub release", "summary": clean_text(release.get("body", ""), 700), "url": release.get("html_url", ""), "guid": key, "published_at": release.get("published_at")}, initial_suppress=initializing, score_override=88))
+        title = release.get("name") or release.get("tag_name") or "GitHub release"
+        summary = clean_text(release.get("body", ""), 700)
+        text = (str(title) + " " + summary).casefold()
+        major = bool(re.search(r"\b(v?\d+\.0(?:\.0)?|major|breaking|security|critical|deprecated)\b", text))
+        release_score = 92 if major else 78
+        candidates.append(_source_item(source, {"title": title, "summary": summary, "url": release.get("html_url", ""), "guid": key, "published_at": release.get("published_at")}, initial_suppress=initializing, score_override=release_score))
     save_source_state(conn, source["id"], {"initialized": True, "seen": keys[:100]})
     return candidates
 
@@ -331,13 +338,13 @@ def weather_candidates(conn, config: dict) -> list[dict]:
 
     rain_codes = set(range(51, 68)) | set(range(80, 83))
     storm_rows = [row for row in rows if row["code"] >= 95]
-    rain_rows = [row for row in rows if row["probability"] >= config["WEATHER_RAIN_PROBABILITY"] or row["amount"] >= config["WEATHER_RAIN_MM"] or row["code"] in rain_codes]
-    if rain_rows and all(row["code"] >= 95 for row in rain_rows):
+    rain_rows = [row for row in rows if (row["probability"] >= config["WEATHER_RAIN_PROBABILITY"] and row["amount"] >= 2) or row["amount"] >= config["WEATHER_RAIN_MM"]]
+    if storm_rows:
         rain_rows = []
     hot_rows = [row for row in rows if (row["temperature"] is not None and row["temperature"] >= config["WEATHER_HOT_C"]) or (row["apparent"] is not None and row["apparent"] >= config["WEATHER_HOT_C"] + 2)]
     cold_rows = [row for row in rows if (row["temperature"] is not None and row["temperature"] <= config["WEATHER_COLD_C"]) or (row["apparent"] is not None and row["apparent"] <= config["WEATHER_COLD_C"] - 2)]
-    wind_rows = [row for row in rows if row["wind"] >= config["WEATHER_WIND_KMH"]]
-    fog_rows = [row for row in rows if row["code"] in {45, 48}]
+    wind_rows = [] if storm_rows else [row for row in rows if row["wind"] >= config["WEATHER_WIND_KMH"]]
+    fog_rows = []
     alerts = {
         "storm": storm_rows,
         "rain": rain_rows,
@@ -389,8 +396,17 @@ def weather_candidates(conn, config: dict) -> list[dict]:
         candidate = _source_item(source, item, initial_suppress=initializing, score_override=scores[category])
         candidate["body"] = f"forecast weather alert: {category}; checked {config['WEATHER_LOOKAHEAD_HOURS']}-hour outlook"
         candidate["metadata"].update({
+            "weather_label": config["WEATHER_LABEL"],
             "weather_category": category,
             "alert_window": window,
+            "earliest_forecast_at": matching[0]["when"],
+            "latest_forecast_at": matching[-1]["when"],
+            "alert_signature": "|".join([
+                category, window, matching[0]["when"][:13], str(peak_probability // 10),
+                str(int(peak_amount // 5)), str(int(peak_wind // 10)),
+                str(int(max(temperatures_seen or [0]) // 2)), str(int(min(temperatures_seen or [0]) // 2)),
+            ]),
+            "safety_critical": category in {"storm", "wind"},
             "lookahead_hours": config["WEATHER_LOOKAHEAD_HOURS"],
             "peak_precipitation_probability": peak_probability,
             "peak_precipitation_mm": round(peak_amount, 1),
@@ -400,12 +416,100 @@ def weather_candidates(conn, config: dict) -> list[dict]:
     return candidates
 
 
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371.0
+    lat1, lat2 = math.radians(lat1), math.radians(lat2)
+    delta_lat = lat2 - lat1
+    delta_lon = math.radians(lon2 - lon1)
+    value = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    return radius * 2 * math.asin(math.sqrt(min(1, value)))
+
+
+def _earthquake_relevance(magnitude: float, distance: float, depth: float, config: dict) -> tuple[bool, int, str]:
+    major = magnitude >= config["EARTHQUAKE_MAJOR_MAG"]
+    if major:
+        return True, 99, "major earthquake"
+    if distance <= 50:
+        minimum = config["EARTHQUAKE_LOCAL_MIN_MAG"]
+    elif distance <= 100:
+        minimum = max(config["EARTHQUAKE_LOCAL_MIN_MAG"], 5.0)
+    elif distance <= 250:
+        minimum = max(config["EARTHQUAKE_LOCAL_MIN_MAG"], 5.5)
+    elif distance <= config["EARTHQUAKE_LOCAL_RADIUS_KM"]:
+        minimum = max(config["EARTHQUAKE_LOCAL_MIN_MAG"], 6.0)
+    else:
+        return False, 15, "too distant for local impact"
+    if depth > 120:
+        minimum += 0.5
+    if magnitude < minimum:
+        return False, max(10, round(magnitude * 6)), "below local felt-impact threshold"
+    score = min(97, 88 + round((magnitude - minimum) * 8) + (3 if depth <= 50 else 0))
+    return True, score, "could be felt near La Ceja"
+
+
+def earthquake_candidates(conn, config: dict) -> list[dict]:
+    if not config.get("EARTHQUAKE_ENABLED", True):
+        return []
+    payload = json.loads(_request(config["EARTHQUAKE_FEED_URL"], {"Accept": "application/geo+json, application/json"}).decode("utf-8"))
+    state = get_source_state(conn, "earthquakes:usgs")
+    seen = set(state.get("seen", []))
+    initializing = not bool(state.get("initialized"))
+    keys = []
+    candidates = []
+    for feature in payload.get("features", [])[:200]:
+        props = feature.get("properties") or {}
+        event_key = str(feature.get("id") or props.get("code") or props.get("url") or "")
+        if not event_key:
+            continue
+        keys.append(event_key)
+        if event_key in seen and not initializing:
+            continue
+        coordinates = (feature.get("geometry") or {}).get("coordinates") or []
+        if len(coordinates) < 3 or props.get("mag") is None:
+            continue
+        try:
+            magnitude = float(props["mag"])
+            lon, lat, depth = float(coordinates[0]), float(coordinates[1]), float(coordinates[2])
+        except (TypeError, ValueError):
+            continue
+        distance = _distance_km(config["WEATHER_LAT"], config["WEATHER_LON"], lat, lon)
+        relevant, score, reason = _earthquake_relevance(magnitude, distance, depth, config)
+        place = clean_text(props.get("place", "unknown location"), 180)
+        title = f"M{magnitude:g} earthquake near La Ceja" if relevant else f"M{magnitude:g} earthquake detected"
+        summary = f"{place}; about {distance:,.0f} km from La Ceja and {depth:g} km deep. {reason}."
+        item = {
+            "title": title,
+            "summary": summary,
+            "url": props.get("url") or "https://earthquake.usgs.gov/earthquakes/map/",
+            "guid": event_key,
+            "published_at": datetime.fromtimestamp(props["time"] / 1000, timezone.utc).replace(microsecond=0).isoformat() if props.get("time") else None,
+        }
+        source = {"id": "earthquakes:usgs", "kind": "earthquake", "label": "USGS earthquakes", "topic": "earthquake", "trust": "primary", "keywords": []}
+        candidate = _source_item(source, item, initial_suppress=initializing, score_override=score)
+        candidate["relevant"] = relevant
+        candidate["metadata"].update({
+            "earthquake_id": event_key,
+            "magnitude": magnitude,
+            "distance_km": round(distance, 1),
+            "depth_km": round(depth, 1),
+            "local_impact": reason,
+            "safety_critical": magnitude >= config["EARTHQUAKE_MAJOR_MAG"],
+        })
+        candidates.append(candidate)
+    save_source_state(conn, "earthquakes:usgs", {"initialized": True, "seen": keys[:200]})
+    return candidates
+
+
 def collect_candidates(conn, config: dict) -> list[dict]:
     candidates = []
     try:
         candidates.extend(weather_candidates(conn, config))
     except Exception as exc:
         LOGGER.warning("weather source failed: %s", exc)
+    try:
+        candidates.extend(earthquake_candidates(conn, config))
+    except Exception as exc:
+        LOGGER.warning("earthquake source failed: %s", exc)
     for source in configured_sources(config):
         try:
             if source["kind"] == "rss":

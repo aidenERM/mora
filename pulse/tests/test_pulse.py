@@ -10,9 +10,9 @@ from werkzeug.security import generate_password_hash
 from pulse_app.app import create_app
 from pulse_app import discovery, sources
 from pulse_app.config import load_config
-from pulse_app.rules import is_quiet_hours, score_item
+from pulse_app.rules import is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.storage import connect, init_db
+from pulse_app.storage import connect, get_preferences, init_db, mark_notified, pending_events, upsert_event
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -220,7 +220,39 @@ def test_weather_alerts_cover_rain_storm_heat_cold_and_wind(tmp_path, monkeypatc
     monkeypatch.setattr(sources, "_request", lambda url, headers=None: json.dumps(forecast).encode())
     candidates = sources.weather_candidates(conn, config)
     categories = {item["metadata"]["weather_category"] for item in candidates}
-    assert {"rain", "storm", "hot", "cold", "wind"}.issubset(categories)
-    rain = next(item for item in candidates if item["metadata"]["weather_category"] == "rain")
-    assert "precipitation probability" in rain["summary"]
-    assert rain["metadata"]["source_trust"] == "primary"
+    assert {"storm", "hot", "cold"}.issubset(categories)
+    assert "rain" not in categories and "wind" not in categories
+    storm = next(item for item in candidates if item["metadata"]["weather_category"] == "storm")
+    assert "precipitation probability" in storm["summary"]
+    assert storm["metadata"]["source_trust"] == "primary"
+
+
+def test_strict_notification_lifecycle_keeps_history_without_repeat_push(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    config = load_config({
+        "DATABASE_PATH": str(database),
+        "TIMEZONE": "UTC",
+        "NOTIFICATION_COOLDOWNS": {"warzone": 120},
+        "NOTIFICATION_MAX_AGE": {"warzone": 1440},
+    })
+    init_db(database)
+    conn = connect(database)
+    event = {
+        "id": "story-1", "source_id": "feed-a", "source_kind": "rss", "topic": "warzone",
+        "title": "Feed A: Warzone REV recoil changes", "summary": "REV recoil increased in the balance patch.",
+        "body": "matched", "url": "https://a.test/story", "canonical_key": "feed-a:1",
+        "published_at": "2026-09-20T10:00:00+00:00", "score": 92, "priority": "critical", "relevant": True,
+        "metadata": {"source_label": "Feed A", "sources": [{"url": "https://a.test/story", "title": "story"}]},
+    }
+    stored, created = upsert_event(conn, event)
+    assert created and pending_events(conn)
+    mark_notified(conn, stored["id"])
+    duplicate = {**event, "id": "story-2", "source_id": "feed-b", "canonical_key": "feed-b:2", "title": "Warzone update: REV recoil changed", "summary": "The balance patch increased REV recoil."}
+    stored, created = upsert_event(conn, duplicate)
+    assert not created
+    assert pending_events(conn) == []
+    title, body = notification_copy(stored)
+    assert "Feed A:" not in title
+    assert "meaningful Warzone update" in body
+    prefs = get_preferences(conn, config)
+    assert should_notify(stored, prefs, config=config, conn=conn)[0] is False

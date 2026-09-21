@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .rules import canonical_url, clean_text, matched_entities, priority_for, score_item
+from .rules import canonical_url, clean_text, matched_entities, priority_for, score_item, significant_tokens
 from .storage import get_source_state, save_source_state
 
 LOGGER = logging.getLogger("pulse.discovery")
@@ -262,7 +262,8 @@ def _candidate(cluster: list[dict], profile: dict, query: str) -> dict:
                 entities.append(entity)
                 seen_entities.add(entity.get("id"))
     confidence = _confidence(cluster)
-    score, _, reason = score_item(profile.get("topic", "watcher"), best["page"]["title"], best["page"]["content"], profile.get("keywords", []), always_relevant=True)
+    keywords = profile.get("keywords", []) or list(significant_tokens(best["page"]["title"]))[:6]
+    score, _, reason = score_item(profile.get("topic", "watcher"), best["page"]["title"], best["page"]["content"], keywords, always_relevant=False)
     score += {"primary": 8, "reliable_secondary": 2, "community": -8}.get(best["trust"], 0)
     score += min(30, sum(max(0, int(entity.get("boost", 0))) for entity in entities))
     score += {"confirmed": 8, "likely": 3, "rumor": -18}[confidence]

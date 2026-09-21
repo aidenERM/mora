@@ -9,12 +9,26 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 
 DEFAULT_THRESHOLDS = {
-    "weather": 60,
-    "warzone": 72,
-    "apple": 78,
-    "github": 65,
-    "colombia": 84,
-    "watcher": 80,
+    "weather": 88,
+    "warzone": 84,
+    "apple": 88,
+    "github": 82,
+    "colombia": 90,
+    "watcher": 88,
+    "earthquake": 92,
+    "system": 0,
+}
+
+# These floors keep an accidentally permissive stored preference or old .env
+# value from turning Pulse back into an RSS-to-push relay.
+STRICT_MIN_THRESHOLDS = {
+    "weather": 88,
+    "warzone": 84,
+    "apple": 88,
+    "github": 82,
+    "colombia": 90,
+    "watcher": 88,
+    "earthquake": 92,
     "system": 0,
 }
 
@@ -25,6 +39,7 @@ TOPIC_LABELS = {
     "github": "Projects",
     "colombia": "Colombia",
     "watcher": "Watchers",
+    "earthquake": "Earthquakes",
     "system": "Pulse",
 }
 
@@ -122,8 +137,32 @@ def load_config(test_config: dict | None = None) -> dict:
         "POLL_MINUTES": max(5, int(os.environ.get("PULSE_POLL_MINUTES", "15"))),
         "QUIET_START": os.environ.get("PULSE_QUIET_START", "23:00"),
         "QUIET_END": os.environ.get("PULSE_QUIET_END", "07:00"),
-        "QUIET_BYPASS_PRIORITY": int(os.environ.get("PULSE_QUIET_BYPASS_PRIORITY", "90")),
+        "QUIET_BYPASS_PRIORITY": int(os.environ.get("PULSE_QUIET_BYPASS_PRIORITY", "98")),
         "TOPIC_THRESHOLDS": {**DEFAULT_THRESHOLDS, **(_json("PULSE_TOPIC_THRESHOLDS_JSON", {}) or {})},
+        "STRICT_MIN_THRESHOLDS": {**STRICT_MIN_THRESHOLDS, **(_json("PULSE_STRICT_MIN_THRESHOLDS_JSON", {}) or {})},
+        "NOTIFICATION_COOLDOWNS": {**{
+            "weather": 180,
+            "warzone": 120,
+            "apple": 180,
+            "github": 120,
+            "colombia": 240,
+            "watcher": 240,
+            "earthquake": 60,
+            "system": 0,
+        }, **(_json("PULSE_NOTIFICATION_COOLDOWNS_JSON", {}) or {})},
+        "NOTIFICATION_MAX_AGE": {**{
+            "weather": 180,
+            "warzone": 1440,
+            "apple": 1440,
+            "github": 2880,
+            "colombia": 720,
+            "watcher": 720,
+            "earthquake": 360,
+            "system": 1440,
+        }, **(_json("PULSE_NOTIFICATION_MAX_AGE_JSON", {}) or {})},
+        "MAX_NOTIFICATIONS_PER_RUN": max(1, min(5, int(os.environ.get("PULSE_MAX_NOTIFICATIONS_PER_RUN", "2")))),
+        "URGENT_NOTIFY_SCORE": max(95, min(100, int(os.environ.get("PULSE_URGENT_NOTIFY_SCORE", "98")))),
+        "MATERIAL_UPDATE_SCORE_DELTA": max(5, min(40, int(os.environ.get("PULSE_MATERIAL_UPDATE_SCORE_DELTA", "12")))),
         "VAPID_PUBLIC_KEY": os.environ.get("PULSE_VAPID_PUBLIC_KEY", ""),
         "VAPID_PRIVATE_KEY": os.environ.get("PULSE_VAPID_PRIVATE_KEY", ""),
         "VAPID_SUBJECT": os.environ.get("PULSE_VAPID_SUBJECT", ""),
@@ -133,9 +172,14 @@ def load_config(test_config: dict | None = None) -> dict:
         "WEATHER_LOOKAHEAD_HOURS": max(6, min(48, int(os.environ.get("PULSE_WEATHER_LOOKAHEAD_HOURS", "24")))),
         "WEATHER_HOT_C": float(os.environ.get("PULSE_WEATHER_HOT_C", "28")),
         "WEATHER_COLD_C": float(os.environ.get("PULSE_WEATHER_COLD_C", "12")),
-        "WEATHER_RAIN_PROBABILITY": max(40, min(100, int(os.environ.get("PULSE_WEATHER_RAIN_PROBABILITY", "60")))),
-        "WEATHER_RAIN_MM": max(0.1, float(os.environ.get("PULSE_WEATHER_RAIN_MM", "2"))),
-        "WEATHER_WIND_KMH": max(20, float(os.environ.get("PULSE_WEATHER_WIND_KMH", "40"))),
+        "WEATHER_RAIN_PROBABILITY": max(60, min(100, int(os.environ.get("PULSE_WEATHER_RAIN_PROBABILITY", "75")))),
+        "WEATHER_RAIN_MM": max(0.5, float(os.environ.get("PULSE_WEATHER_RAIN_MM", "5"))),
+        "WEATHER_WIND_KMH": max(30, float(os.environ.get("PULSE_WEATHER_WIND_KMH", "50"))),
+        "EARTHQUAKE_ENABLED": _bool("PULSE_EARTHQUAKE_ENABLED", True),
+        "EARTHQUAKE_FEED_URL": os.environ.get("PULSE_EARTHQUAKE_FEED_URL", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"),
+        "EARTHQUAKE_LOCAL_RADIUS_KM": max(50, float(os.environ.get("PULSE_EARTHQUAKE_LOCAL_RADIUS_KM", "400"))),
+        "EARTHQUAKE_LOCAL_MIN_MAG": max(3.5, float(os.environ.get("PULSE_EARTHQUAKE_LOCAL_MIN_MAG", "4.5"))),
+        "EARTHQUAKE_MAJOR_MAG": max(5.5, float(os.environ.get("PULSE_EARTHQUAKE_MAJOR_MAG", "6.5"))),
         "GITHUB_REPOS": [x.strip() for x in os.environ.get("PULSE_GITHUB_REPOS", "").split(",") if x.strip()],
         "GITHUB_TOKEN": os.environ.get("PULSE_GITHUB_TOKEN", ""),
         "GITHUB_WEBHOOK_SECRET": os.environ.get("PULSE_GITHUB_WEBHOOK_SECRET", ""),
