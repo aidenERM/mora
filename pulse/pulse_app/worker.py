@@ -53,7 +53,8 @@ def run_once(config: dict | None = None) -> dict:
     try:
         runtime = runtime_config(conn, config)
         for provider in ("google", "discord", "apple-calendar", "apple-contacts", "apple-mail"):
-            if conn.execute("SELECT 1 FROM integration_credentials WHERE provider=?", (provider,)).fetchone():
+            credential_provider = "icloud" if provider.startswith("apple-") else provider
+            if conn.execute("SELECT 1 FROM integration_credentials WHERE provider=?", (credential_provider,)).fetchone():
                 try:
                     sync_provider(conn, config, provider)
                 except Exception as exc:
