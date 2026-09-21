@@ -6,6 +6,8 @@ const state = {
   discovery: null,
   learning: null,
   audit: null,
+  integrations: [],
+  context: [],
   subscription: false,
   detail: null,
   serviceWorkerRegistration: null,
@@ -131,12 +133,14 @@ async function enableAlerts() {
 }
 
 async function loadAuthenticatedState() {
-  const [events, preferences, discovery, learning, audit] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30")]);
+  const [events, preferences, discovery, learning, audit, integrations] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/integrations")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
   state.discovery = discovery;
   state.learning = learning;
   state.audit = audit;
+  state.integrations = integrations.integrations || [];
+  state.context = integrations.context || [];
   await checkSubscription();
 }
 
@@ -235,10 +239,32 @@ function detailFeedback(event) {
   return `<div class="feedback-row"><button class="button ghost-button" data-action="feedback" data-feedback="useful" data-event-id="${escapeHtml(event.id)}">useful</button><button class="button ghost-button" data-action="feedback" data-feedback="not_useful" data-event-id="${escapeHtml(event.id)}">not useful</button><button class="button ghost-button" data-action="feedback" data-feedback="too_late" data-event-id="${escapeHtml(event.id)}">too late</button>${followButtons}<button class="button ghost-button" data-action="less-like" data-event-id="${escapeHtml(event.id)}">less like this</button></div>`;
 }
 
+function integrationsCard() {
+  const active = state.context?.filter((item) => item.active) || [];
+  const mode = active.find((item) => item.kind === "mode")?.value?.mode || "unknown";
+  return `<section class="rules-card"><div class="rules-body"><div class="eyebrow">context and connections</div><h3>Pulse integrations</h3><p class="field-note">current mode: ${escapeHtml(mode)} · ${state.integrations.filter((item) => item.connection_state === "connected").length} connected</p><a class="button secondary full" href="/integrations">open integrations</a></div></section>`;
+}
+
+function renderIntegrations() {
+  document.title = "Pulse · integrations";
+  const cards = (state.integrations || []).map((item) => {
+    const provider = item.provider;
+    const connect = provider === "google" ? `<a class="button secondary" href="/api/integrations/google/connect">connect Google</a>` : provider === "discord" ? `<a class="button secondary" href="/api/integrations/discord/connect">connect Discord</a>` : "";
+    const test = provider === "apple" ? `<button class="button secondary" data-action="pair-companion">pair iPhone</button>` : `<button class="button secondary" data-action="integration-test" data-provider="${escapeHtml(provider)}">test</button>`;
+    const sync = ["google", "gmail", "calendar", "discord"].includes(provider) ? `<button class="button ghost-button" data-action="integration-sync" data-provider="${escapeHtml(provider)}">sync now</button>` : "";
+    const disconnect = item.has_credentials && ["google", "discord"].includes(provider) ? `<button class="button ghost-button" data-action="integration-disconnect" data-provider="${escapeHtml(provider)}">disconnect</button>` : "";
+    const status = item.connection_state === "connected" ? "connected" : item.connection_state === "error" ? "needs attention" : item.configured ? "ready to connect" : "not configured";
+    const description = provider === "apple" ? "Native iPhone companion for Calendar, Reminders, derived context, location modes, HomeKit/MusicKit signals, and Shortcuts." : provider === "aws-bedrock" ? `Server-side structured AI using ${state.config?.bedrock_model_id || "openai.gpt-5.6-luna"}.` : provider === "discord" ? "Official OAuth only. Pulse never uses user tokens or scrapes messages." : "Read-only Gmail and Calendar access with minimal metadata storage.";
+    return `<section class="rules-card"><div class="rules-body"><div class="eyebrow">integration</div><div class="diagnostic-row"><span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(status)}${item.last_error ? " · " + escapeHtml(item.last_error) : ""}</small></span><span class="status-dot ${item.connection_state === "connected" ? "active" : "muted-dot"}"></span></div><p class="field-note">${escapeHtml(description)}</p><div class="feedback-row">${connect}${test}${sync}${disconnect}</div></div></section>`;
+  }).join("");
+  const contextRows = (state.context || []).map((item) => `<div class="diagnostic-row"><span>${escapeHtml(item.kind)}<small>${escapeHtml(item.source)}</small></span><strong>${escapeHtml(JSON.stringify(item.value))}</strong></div>`).join("") || `<p class="fine-print">no companion context has been received</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">private signal layer</div><h1>integrations</h1></div><a class="icon-button" href="/">←</a></section><p class="lede">connect only the context Pulse can use to make a better decision. credentials stay server-side.</p>${cards}<section class="quality-card diagnostics"><span class="eyebrow">active context</span>${contextRows}</section><a class="button ghost-button full" href="/">back to history</a>`;
+}
+
 function renderHome() {
   document.title = "Pulse · quiet signals";
   const events = state.events.length ? state.events.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing worth interrupting you for</h2><p>That is the point. New events will appear here when they matter.</p></div>`;
-  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
+  app.innerHTML = `<section class="page-heading"><div><div class="eyebrow">aiden · personal feed</div><h1>your pulse</h1></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">recent signals</span><h2>history</h2></div><span class="muted">${state.events.length} saved</span></section><section class="event-list">${events}</section>${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">Pulse is quiet by default. source credentials never leave the server.</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -265,6 +291,8 @@ function render() {
   }
   if (location.pathname.startsWith("/event/")) {
     renderDetail(decodeURIComponent(location.pathname.slice("/event/".length)));
+  } else if (location.pathname.startsWith("/integrations")) {
+    renderIntegrations();
   } else {
     renderHome();
   }
@@ -377,6 +405,25 @@ document.addEventListener("click", async (event) => {
       await api("/api/learning", { method: "DELETE", body: "{}" });
       state.learning = await api("/api/learning");
       showToast("feedback history reset");
+    }
+    if (action === "integration-test") {
+      const result = await api(`/api/integrations/${encodeURIComponent(event.target.closest("[data-provider]")?.dataset.provider)}/test`, { method: "POST", body: "{}" });
+      showToast(result.ok ? "integration test passed" : "integration is not connected", !result.ok);
+      await loadAuthenticatedState(); renderIntegrations();
+    }
+    if (action === "integration-sync") {
+      const provider = event.target.closest("[data-provider]")?.dataset.provider;
+      await api(`/api/integrations/${encodeURIComponent(provider)}/sync`, { method: "POST", body: "{}" });
+      showToast("sync complete"); await loadAuthenticatedState(); renderIntegrations();
+    }
+    if (action === "integration-disconnect") {
+      const provider = event.target.closest("[data-provider]")?.dataset.provider;
+      await api(`/api/integrations/${encodeURIComponent(provider)}/disconnect`, { method: "POST", body: "{}" });
+      showToast("integration disconnected"); await loadAuthenticatedState(); renderIntegrations();
+    }
+    if (action === "pair-companion") {
+      const result = await api("/api/companion/pair/start", { method: "POST", body: "{}" });
+      window.prompt("enter this one-time code in the Pulse companion app", result.code);
     }
   } catch (error) {
     showToast(error.message, true);

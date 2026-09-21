@@ -14,7 +14,8 @@ from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.sources import parse_feed
-from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, upsert_event
+from pulse_app.integrations import classify_gmail_message, create_oauth_state, consume_oauth_state
+from pulse_app.storage import connect, create_morning_catchup, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, record_notification_decision, upsert_event, upsert_package, upsert_purchase
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -71,6 +72,62 @@ def test_subscription_validation_and_preferences(tmp_path):
     result = client.put("/api/preferences", json={"quiet_start": "22:00", "quiet_end": "06:00", "topic_thresholds": {"warzone": 80}})
     assert result.status_code == 200
     assert result.json["preferences"]["topic_thresholds"]["warzone"] == 80
+
+
+def test_integrations_status_pairing_and_context(tmp_path):
+    client = make_client(tmp_path)
+    assert client.get("/api/integrations").status_code == 401
+    login(client)
+    status = client.get("/api/integrations")
+    assert status.status_code == 200
+    assert {item["provider"] for item in status.json["integrations"]} >= {"apple", "google", "aws-bedrock"}
+    challenge = client.post("/api/companion/pair/start", json={})
+    assert challenge.status_code == 200
+    redeemed = client.post("/api/companion/pair/redeem", json={"code": challenge.json["code"], "label": "test iPhone"})
+    assert redeemed.status_code == 200
+    context = client.post("/api/companion/context", json={"mode": "outside", "confidence": 0.9}, headers={"Authorization": "Bearer " + redeemed.json["token"]})
+    assert context.status_code == 200
+    assert context.json["context"][0]["value"]["mode"] == "outside"
+    assert client.post("/api/companion/context", json={"mode": "home"}, headers={"Authorization": "Bearer bad"}).status_code == 401
+
+
+def test_gmail_classification_and_lifecycle_storage(tmp_path):
+    message = {"id": "m1", "snippet": "Your package is out for delivery 1Z1234567890123456", "payload": {"headers": [{"name": "Subject", "value": "Package update"}, {"name": "From", "value": "store@example.test"}]}}
+    classified = classify_gmail_message(message)
+    assert classified["topic"] == "package"
+    assert "body" not in classified
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    package_id = upsert_package(conn, classified["tracking_number"], "store@example.test", status="out_for_delivery", source="gmail")
+    assert upsert_package(conn, classified["tracking_number"], "store@example.test", status="delivered", source="gmail") == package_id
+    purchase_id = upsert_purchase(conn, "gmail:m2", merchant="store@example.test", title="Order confirmation", lifecycle="ordered")
+    assert upsert_purchase(conn, "gmail:m2", merchant="store@example.test", title="Order confirmation", lifecycle="shipped") == purchase_id
+    conn.commit()
+    assert conn.execute("SELECT id FROM packages").fetchone()["id"] == package_id
+    assert conn.execute("SELECT id FROM purchases").fetchone()["id"] == purchase_id
+
+
+def test_oauth_state_is_single_use(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    state = create_oauth_state(conn, "google")
+    assert consume_oauth_state(conn, "google", state) == {}
+    assert consume_oauth_state(conn, "google", state) is None
+
+
+def test_bedrock_structured_validation(monkeypatch):
+    from pulse_app import bedrock
+
+    class FakeClient:
+        def converse(self, **_kwargs):
+            return {"output": {"message": {"content": [{"text": '{"status":"ok"}'}]}}, "usage": {"inputTokens": 2, "outputTokens": 3}, "stopReason": "end_turn"}
+
+    monkeypatch.setattr(bedrock, "_client", lambda _config: FakeClient())
+    value, metadata = bedrock.invoke_json({"AWS_REGION": "us-east-1", "BEDROCK_MODEL_ID": "openai.gpt-5.6-luna"}, "health", {}, {"status": "string"})
+    assert value == {"status": "ok"}
+    assert metadata["output_tokens"] == 3
 
 
 def test_relevance_and_quiet_hours():

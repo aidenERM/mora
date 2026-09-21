@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+try:
+    from cryptography.fernet import Fernet
+except ImportError:  # pragma: no cover - optional until integrations are enabled
+    Fernet = None
 
 from .config import DEFAULT_SEARCH_PROFILES, DEFAULT_THRESHOLDS, DEFAULT_TRACKED_ENTITIES
 from .rules import cluster_id_for, clean_event_summary, clean_event_title, event_fingerprint, events_similar, materially_changed, normalize
@@ -65,6 +72,79 @@ CREATE TABLE IF NOT EXISTS events (
     notification_count INTEGER NOT NULL DEFAULT 0,
     last_notification_at TEXT,
     notification_reason TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS integrations (
+    provider TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    connection_state TEXT NOT NULL DEFAULT 'not_configured',
+    authorization_state TEXT NOT NULL DEFAULT 'not_configured',
+    last_success_at TEXT,
+    last_attempted_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS integration_credentials (
+    provider TEXT PRIMARY KEY,
+    ciphertext TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_states (
+    state TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS context_signals (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    value_json TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL,
+    expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_context_active ON context_signals(kind, expires_at, observed_at DESC);
+CREATE TABLE IF NOT EXISTS companion_devices (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS pairing_challenges (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT UNIQUE NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS packages (
+    id TEXT PRIMARY KEY,
+    tracking_number TEXT NOT NULL,
+    carrier TEXT NOT NULL DEFAULT '',
+    merchant TEXT NOT NULL DEFAULT '',
+    order_id TEXT NOT NULL DEFAULT '',
+    estimated_delivery TEXT,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    status_history TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    UNIQUE(tracking_number, merchant)
+);
+CREATE TABLE IF NOT EXISTS purchases (
+    id TEXT PRIMARY KEY,
+    external_key TEXT UNIQUE NOT NULL,
+    merchant TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    amount REAL,
+    currency TEXT NOT NULL DEFAULT '',
+    lifecycle TEXT NOT NULL DEFAULT 'interested',
+    order_id TEXT NOT NULL DEFAULT '',
+    package_id TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_recent ON events(discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic, discovered_at DESC);
@@ -153,6 +233,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _safe_json(value, fallback=None):
+    try:
+        return json.loads(value) if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        return fallback if fallback is not None else {}
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=20)
@@ -160,6 +247,141 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def save_integration(conn: sqlite3.Connection, provider: str, label: str, **fields) -> None:
+    existing = conn.execute("SELECT * FROM integrations WHERE provider=?", (provider,)).fetchone()
+    values = {
+        "enabled": int(fields.get("enabled", existing["enabled"] if existing else 0)),
+        "connection_state": fields.get("connection_state", existing["connection_state"] if existing else "not_configured"),
+        "authorization_state": fields.get("authorization_state", existing["authorization_state"] if existing else "not_configured"),
+        "last_success_at": fields.get("last_success_at", existing["last_success_at"] if existing else None),
+        "last_attempted_at": fields.get("last_attempted_at", existing["last_attempted_at"] if existing else None),
+        "last_error": fields.get("last_error", existing["last_error"] if existing else ""),
+        "metadata": json.dumps(fields.get("metadata", json.loads(existing["metadata"]) if existing else {}), separators=(",", ":")),
+        "updated_at": utc_now(),
+    }
+    conn.execute(
+        """INSERT INTO integrations(provider,label,enabled,connection_state,authorization_state,last_success_at,last_attempted_at,last_error,metadata,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(provider) DO UPDATE SET label=excluded.label,enabled=excluded.enabled,connection_state=excluded.connection_state,
+             authorization_state=excluded.authorization_state,last_success_at=excluded.last_success_at,last_attempted_at=excluded.last_attempted_at,
+             last_error=excluded.last_error,metadata=excluded.metadata,updated_at=excluded.updated_at""",
+        (provider, label, values["enabled"], values["connection_state"], values["authorization_state"], values["last_success_at"], values["last_attempted_at"], values["last_error"], values["metadata"], values["updated_at"]),
+    )
+
+
+def _credential_cipher():
+    key = os.environ.get("PULSE_TOKEN_ENCRYPTION_KEY", "")
+    if not key or Fernet is None:
+        raise RuntimeError("token encryption is not configured")
+    return Fernet(key.encode("ascii"))
+
+
+def save_credential(conn: sqlite3.Connection, provider: str, value: dict) -> None:
+    ciphertext = _credential_cipher().encrypt(json.dumps(value, separators=(",", ":")).encode()).decode("ascii")
+    conn.execute(
+        "INSERT INTO integration_credentials(provider,ciphertext,updated_at) VALUES(?,?,?) ON CONFLICT(provider) DO UPDATE SET ciphertext=excluded.ciphertext,updated_at=excluded.updated_at",
+        (provider, ciphertext, utc_now()),
+    )
+    conn.commit()
+
+
+def load_credential(conn: sqlite3.Connection, provider: str) -> dict | None:
+    row = conn.execute("SELECT ciphertext FROM integration_credentials WHERE provider=?", (provider,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(_credential_cipher().decrypt(row["ciphertext"].encode()).decode())
+    except (json.JSONDecodeError, ValueError, TypeError):
+        raise RuntimeError("stored integration credential is invalid")
+
+
+def set_context_signal(conn: sqlite3.Connection, kind: str, value: dict, source: str, confidence: float, expires_at: str | None = None) -> str:
+    marker = hashlib.sha256((kind + ":" + source + ":" + json.dumps(value, sort_keys=True)).encode()).hexdigest()[:24]
+    conn.execute(
+        "INSERT INTO context_signals(id,kind,value_json,source,confidence,observed_at,expires_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET value_json=excluded.value_json,confidence=excluded.confidence,observed_at=excluded.observed_at,expires_at=excluded.expires_at",
+        (marker, kind, json.dumps(value, separators=(",", ":")), source, max(0.0, min(1.0, float(confidence))), utc_now(), expires_at),
+    )
+    return marker
+
+
+def create_pairing_challenge(conn: sqlite3.Connection, minutes: int = 10) -> tuple[str, str]:
+    code = "-".join([secrets.token_hex(2).upper(), secrets.token_hex(2).upper()])
+    challenge_id = secrets.token_urlsafe(16)
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    conn.execute("INSERT INTO pairing_challenges(id,code_hash,expires_at) VALUES(?,?,?)", (challenge_id, code_hash, (datetime.now(timezone.utc) + timedelta(minutes=minutes)).replace(microsecond=0).isoformat()))
+    conn.commit()
+    return challenge_id, code
+
+
+def redeem_pairing_challenge(conn: sqlite3.Connection, code: str, label: str) -> tuple[str, str] | None:
+    code_hash = hashlib.sha256(code.strip().upper().encode()).hexdigest()
+    row = conn.execute("SELECT * FROM pairing_challenges WHERE code_hash=? AND used_at IS NULL AND expires_at>=?", (code_hash, utc_now())).fetchone()
+    if not row:
+        return None
+    token = secrets.token_urlsafe(32)
+    device_id = secrets.token_urlsafe(12)
+    conn.execute("UPDATE pairing_challenges SET used_at=? WHERE id=?", (utc_now(), row["id"]))
+    conn.execute("INSERT INTO companion_devices(id,label,token_hash,created_at) VALUES(?,?,?,?)", (device_id, label[:120] or "Pulse companion", hashlib.sha256(token.encode()).hexdigest(), utc_now()))
+    conn.commit()
+    return device_id, token
+
+
+def companion_device(conn: sqlite3.Connection, token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    row = conn.execute("SELECT * FROM companion_devices WHERE token_hash=? AND revoked_at IS NULL", (token_hash,)).fetchone()
+    if row:
+        conn.execute("UPDATE companion_devices SET last_seen_at=? WHERE id=?", (utc_now(), row["id"]))
+    return row
+
+
+def upsert_package(conn: sqlite3.Connection, tracking_number: str, merchant: str = "", **fields) -> str:
+    tracking_number = str(tracking_number).strip()[:120]
+    merchant = str(merchant).strip()[:160]
+    if not tracking_number:
+        raise ValueError("tracking number is required")
+    existing = conn.execute("SELECT * FROM packages WHERE tracking_number=? AND merchant=?", (tracking_number, merchant)).fetchone()
+    package_id = existing["id"] if existing else "pkg-" + hashlib.sha256((tracking_number + ":" + merchant).encode()).hexdigest()[:24]
+    status = str(fields.get("status", existing["status"] if existing else "unknown"))[:40]
+    history = _safe_json(existing["status_history"], []) if existing else []
+    if not isinstance(history, list):
+        history = []
+    if not history or history[-1].get("status") != status:
+        history.append({"status": status, "at": utc_now()})
+    conn.execute(
+        """INSERT INTO packages(id,tracking_number,carrier,merchant,order_id,estimated_delivery,status,status_history,source,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(tracking_number,merchant) DO UPDATE SET carrier=excluded.carrier,order_id=excluded.order_id,
+             estimated_delivery=excluded.estimated_delivery,status=excluded.status,status_history=excluded.status_history,
+             source=excluded.source,updated_at=excluded.updated_at""",
+        (package_id, tracking_number, str(fields.get("carrier", existing["carrier"] if existing else ""))[:80], merchant,
+         str(fields.get("order_id", existing["order_id"] if existing else ""))[:120], fields.get("estimated_delivery", existing["estimated_delivery"] if existing else None),
+         status, json.dumps(history[-20:], separators=(",", ":")), str(fields.get("source", existing["source"] if existing else ""))[:120], utc_now()),
+    )
+    return package_id
+
+
+def upsert_purchase(conn: sqlite3.Connection, external_key: str, **fields) -> str:
+    external_key = str(external_key).strip()[:240]
+    if not external_key:
+        raise ValueError("purchase key is required")
+    existing = conn.execute("SELECT * FROM purchases WHERE external_key=?", (external_key,)).fetchone()
+    purchase_id = existing["id"] if existing else "purchase-" + hashlib.sha256(external_key.encode()).hexdigest()[:24]
+    metadata = fields.get("metadata", _safe_json(existing["metadata"], {}) if existing else {})
+    conn.execute(
+        """INSERT INTO purchases(id,external_key,merchant,title,amount,currency,lifecycle,order_id,package_id,metadata,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(external_key) DO UPDATE SET merchant=excluded.merchant,title=excluded.title,amount=excluded.amount,
+             currency=excluded.currency,lifecycle=excluded.lifecycle,order_id=excluded.order_id,package_id=excluded.package_id,
+             metadata=excluded.metadata,updated_at=excluded.updated_at""",
+        (purchase_id, external_key, str(fields.get("merchant", existing["merchant"] if existing else ""))[:160],
+         str(fields.get("title", existing["title"] if existing else ""))[:240], fields.get("amount", existing["amount"] if existing else None),
+         str(fields.get("currency", existing["currency"] if existing else ""))[:12], str(fields.get("lifecycle", existing["lifecycle"] if existing else "interested"))[:40],
+         str(fields.get("order_id", existing["order_id"] if existing else ""))[:120], fields.get("package_id", existing["package_id"] if existing else None),
+         json.dumps(metadata if isinstance(metadata, dict) else {}, separators=(",", ":")), utc_now()),
+    )
+    return purchase_id
 
 
 def init_db(path: str | Path, initial_password_hash: str = "") -> None:
@@ -233,6 +455,8 @@ def default_preferences(config: dict) -> dict:
         "quiet_bypass_priority": config["QUIET_BYPASS_PRIORITY"],
         "topic_thresholds": {**DEFAULT_THRESHOLDS, **config["TOPIC_THRESHOLDS"]},
         "muted_topics": {},
+        "personal_priorities": {},
+        "temporary_priority": {},
     }
 
 
@@ -309,6 +533,8 @@ def get_preferences(conn: sqlite3.Connection, config: dict) -> dict:
     base.update({key: value for key, value in stored.items() if key in base})
     base["topic_thresholds"] = {**base["topic_thresholds"], **stored.get("topic_thresholds", {})}
     base["muted_topics"] = stored.get("muted_topics", {})
+    base["personal_priorities"] = stored.get("personal_priorities", {}) if isinstance(stored.get("personal_priorities", {}), dict) else {}
+    base["temporary_priority"] = stored.get("temporary_priority", {}) if isinstance(stored.get("temporary_priority", {}), dict) else {}
     for key in ("followed_entities", "less_like_entities", "less_like_topics"):
         base[key] = stored.get(key, {}) if isinstance(stored.get(key, {}), dict) else {}
     stored_weights = stored.get("learned_topic_weights", {}) if isinstance(stored.get("learned_topic_weights", {}), dict) else {}

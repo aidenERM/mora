@@ -3,3 +3,4 @@ gunicorn==23.0.0
 pywebpush==2.5.0
 requests>=2.21,<3
 tzdata>=2024.1
+boto3>=1.37,<2

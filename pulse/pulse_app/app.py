@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, make_response, request, send_from_directory, session
+from flask import Flask, jsonify, make_response, redirect, request, send_from_directory, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -46,6 +46,21 @@ from .storage import (
     upsert_event,
 )
 from .worker import _payload
+from .bedrock import classify_or_fallback
+from .integrations import (
+    PROVIDERS,
+    active_context,
+    create_oauth_state,
+    discord_authorization_url,
+    disconnect,
+    exchange_oauth_code,
+    google_authorization_url,
+    mark_failure,
+    mark_success,
+    provider_status,
+    sync_provider,
+)
+from .storage import companion_device, create_pairing_challenge, redeem_pairing_challenge, save_integration, set_context_signal
 
 LOGGER = logging.getLogger(__name__)
 
@@ -130,7 +145,7 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.get("/api/health")
     def health():
-        return jsonify(ok=True, service="pulse", version="0.1.0", push_configured=push_configured(config), now=_now().isoformat())
+        return jsonify(ok=True, service="pulse", version="0.2.0", push_configured=push_configured(config), now=_now().isoformat())
 
     @app.get("/api/config")
     def public_config():
@@ -140,6 +155,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             push_configured=push_configured(config),
             auth_configured=auth_enabled(),
             discovery={"enabled": bool(config.get("BRAVE_SEARCH_API_KEY")), "interval_minutes": config["DISCOVERY_INTERVAL_MINUTES"]},
+            bedrock_model_id=config.get("BEDROCK_MODEL_ID"),
             topics=[{"id": key, "label": TOPIC_LABELS.get(key, key)} for key in config["TOPIC_THRESHOLDS"]],
             ios={"minimum_version": "16.4", "requires_home_screen": True},
         )
@@ -256,6 +272,157 @@ def create_app(test_config: dict | None = None) -> Flask:
             save_json_setting(db(), setting_key, cleaned)
             active["SEARCH_PROFILES" if key == "profiles" else "TRACKED_ENTITIES"] = cleaned
         return jsonify(profiles=active["SEARCH_PROFILES"], entities=active["TRACKED_ENTITIES"])
+
+    @app.get("/api/integrations")
+    @require_auth
+    def integrations_status():
+        return jsonify(integrations=provider_status(db(), config), context=active_context(db()))
+
+    @app.post("/api/integrations/<provider>/disconnect")
+    @require_auth
+    def integration_disconnect(provider: str):
+        if provider not in PROVIDERS:
+            return jsonify(error="unknown_integration"), 404
+        disconnect(db(), provider)
+        db().commit()
+        return jsonify(ok=True, integrations=provider_status(db(), config))
+
+    @app.post("/api/integrations/<provider>/sync")
+    @require_auth
+    def integration_sync(provider: str):
+        if provider not in PROVIDERS:
+            return jsonify(error="unknown_integration"), 404
+        try:
+            result = sync_provider(db(), config, provider)
+            return jsonify(ok=True, result=result, integrations=provider_status(db(), config))
+        except Exception as exc:
+            mark_failure(db(), provider, type(exc).__name__)
+            db().commit()
+            return jsonify(error="integration_sync_failed", detail="provider sync failed", integrations=provider_status(db(), config)), 502
+
+    @app.post("/api/integrations/<provider>/test")
+    @require_auth
+    def integration_test(provider: str):
+        if provider not in PROVIDERS:
+            return jsonify(error="unknown_integration"), 404
+        if provider == "aws-bedrock":
+            value, metadata = classify_or_fallback(config, "Return a minimal JSON health response.", {"service": "Pulse", "check": "connectivity"}, {"status": "string"})
+            if not value:
+                mark_failure(db(), provider, metadata.get("error", "request_failed"))
+                db().commit()
+                return jsonify(ok=False, metadata=metadata, integrations=provider_status(db(), config)), 502
+            mark_success(db(), provider, {"model": metadata.get("model"), "latency_ms": metadata.get("latency_ms")})
+            db().commit()
+            return jsonify(ok=True, metadata=metadata, integrations=provider_status(db(), config))
+        if provider in {"google", "gmail", "calendar", "discord"}:
+            has_credential = bool(db().execute("SELECT 1 FROM integration_credentials WHERE provider=?", ("google" if provider in {"gmail", "calendar"} else provider,)).fetchone())
+            return jsonify(ok=has_credential, configured=has_credential, integrations=provider_status(db(), config))
+        return jsonify(ok=True, configured=True, integrations=provider_status(db(), config))
+
+    @app.get("/api/integrations/google/connect")
+    @require_auth
+    def google_connect():
+        if not config.get("GOOGLE_CLIENT_ID") or not config.get("GOOGLE_CLIENT_SECRET"):
+            return jsonify(error="google_oauth_not_configured"), 503
+        state = create_oauth_state(db(), "google")
+        return redirect(google_authorization_url(config, state))
+
+    @app.get("/api/integrations/discord/connect")
+    @require_auth
+    def discord_connect():
+        if not config.get("DISCORD_CLIENT_ID") or not config.get("DISCORD_CLIENT_SECRET"):
+            return jsonify(error="discord_oauth_not_configured"), 503
+        state = create_oauth_state(db(), "discord")
+        return redirect(discord_authorization_url(config, state))
+
+    @app.get("/api/integrations/<provider>/callback")
+    def integration_callback(provider: str):
+        if provider not in {"google", "discord"}:
+            return jsonify(error="unknown_integration"), 404
+        code, state = request.args.get("code", ""), request.args.get("state", "")
+        if not code or not state:
+            return jsonify(error="invalid_or_expired_oauth_state"), 400
+        try:
+            exchange_oauth_code(db(), config, provider, code, state)
+        except Exception:
+            return jsonify(error="oauth_exchange_failed"), 502
+        return redirect("/integrations?connected=" + provider)
+
+    @app.get("/api/context")
+    @require_auth
+    def context_status():
+        return jsonify(context=active_context(db()))
+
+    @app.post("/api/companion/pair/start")
+    @require_auth
+    def companion_pair_start():
+        challenge_id, code = create_pairing_challenge(db())
+        return jsonify(challenge_id=challenge_id, code=code, expires_in_minutes=10)
+
+    @app.post("/api/companion/pair/redeem")
+    def companion_pair_redeem():
+        body = _json_body()
+        result = redeem_pairing_challenge(db(), str(body.get("code", "")), str(body.get("label", "Pulse iPhone")))
+        if not result:
+            return jsonify(error="invalid_or_expired_pairing_code"), 400
+        device_id, token = result
+        return jsonify(device_id=device_id, token=token)
+
+    @app.post("/api/companion/context")
+    def companion_context():
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not token or not companion_device(db(), token):
+            return jsonify(error="companion_auth_required"), 401
+        body = _json_body()
+        mode = str(body.get("mode", "unknown")).strip().lower()
+        if mode not in {"home", "school", "outside", "travel", "sleep", "unknown"}:
+            return jsonify(error="invalid_context_mode"), 400
+        confidence = body.get("confidence", 0.5)
+        try:
+            confidence = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            return jsonify(error="invalid_confidence"), 400
+        expires_at = body.get("expires_at")
+        set_context_signal(db(), "mode", {"mode": mode}, "apple-companion", confidence, str(expires_at)[:40] if expires_at else None)
+        save_integration(db(), "apple", "Apple companion", enabled=True, connection_state="connected", authorization_state="authorized", last_success_at=_now().isoformat(), last_attempted_at=_now().isoformat(), last_error="", metadata={"last_context_mode": mode})
+        for kind, value in (body.get("signals") or {}).items() if isinstance(body.get("signals"), dict) else []:
+            if kind not in {"device", "calendar", "location_mode", "weather"} or not isinstance(value, dict):
+                continue
+            set_context_signal(db(), kind, value, "apple-companion", confidence, str(expires_at)[:40] if expires_at else None)
+        db().commit()
+        return jsonify(ok=True, context=active_context(db()))
+
+    @app.post("/api/priorities")
+    @require_auth
+    def priorities_update():
+        body = _json_body()
+        priorities = body.get("personal_priorities", {})
+        temporary = body.get("temporary_priority", {})
+        if not isinstance(priorities, dict) or not isinstance(temporary, dict):
+            return jsonify(error="invalid_priorities"), 400
+        cleaned = {}
+        for topic, value in priorities.items():
+            if topic not in TOPIC_LABELS:
+                continue
+            try:
+                cleaned[topic] = max(-20, min(20, int(value)))
+            except (TypeError, ValueError):
+                return jsonify(error="invalid_priority"), 400
+        cleaned_temporary = {}
+        for topic, value in temporary.items():
+            if topic not in TOPIC_LABELS or not isinstance(value, dict):
+                continue
+            try:
+                boost = max(-20, min(20, int(value.get("boost", 0))))
+                expires_at = datetime.fromisoformat(str(value.get("expires_at", "")).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return jsonify(error="invalid_temporary_priority"), 400
+            if expires_at > _now():
+                cleaned_temporary[topic] = {"boost": boost, "expires_at": expires_at.replace(microsecond=0).isoformat()}
+        prefs = get_preferences(db(), config)
+        prefs["personal_priorities"], prefs["temporary_priority"] = cleaned, cleaned_temporary
+        save_preferences(db(), prefs)
+        return jsonify(priorities={"personal_priorities": cleaned, "temporary_priority": cleaned_temporary})
 
     @app.get("/api/learning")
     @require_auth
@@ -530,6 +697,22 @@ def create_app(test_config: dict | None = None) -> Flask:
             events=[item for item in pending if item["priority"] in {"critical", "high"}],
             preferences={"quiet_start": prefs["quiet_start"], "quiet_end": prefs["quiet_end"]},
         )
+
+    @app.post("/api/shortcut/context")
+    def shortcut_context():
+        if not config["SHORTCUT_TOKEN"] or request.headers.get("X-Pulse-Shortcut-Token") != config["SHORTCUT_TOKEN"]:
+            return jsonify(error="shortcut_not_configured"), 403
+        body = _json_body()
+        mode = str(body.get("mode", "unknown")).strip().lower()
+        if mode not in {"home", "school", "outside", "travel", "sleep", "unknown"}:
+            return jsonify(error="invalid_context_mode"), 400
+        try:
+            confidence = max(0.0, min(1.0, float(body.get("confidence", 0.7))))
+        except (TypeError, ValueError):
+            return jsonify(error="invalid_confidence"), 400
+        set_context_signal(db(), "mode", {"mode": mode}, "shortcut", confidence, body.get("expires_at"))
+        db().commit()
+        return jsonify(ok=True, context=active_context(db()))
 
     @app.post("/api/webhooks/github")
     def github_webhook():

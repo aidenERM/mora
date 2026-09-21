@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from .config import load_config
 from .discovery import collect_discovery_candidates
+from .integrations import mark_failure, sync_provider
 from .push import send_payload
 from .rules import apply_preference_adjustments, evaluate_notification, notification_copy
 from .sources import collect_candidates
@@ -51,6 +52,14 @@ def run_once(config: dict | None = None) -> dict:
     errors = []
     try:
         runtime = runtime_config(conn, config)
+        for provider in ("google", "discord"):
+            if conn.execute("SELECT 1 FROM integration_credentials WHERE provider=?", (provider,)).fetchone():
+                try:
+                    sync_provider(conn, config, provider)
+                except Exception as exc:
+                    mark_failure(conn, provider, type(exc).__name__)
+                    errors.append(provider + ":" + type(exc).__name__)
+                    conn.commit()
         direct_candidates = collect_candidates(conn, runtime)
         candidates = [*direct_candidates]
         try:

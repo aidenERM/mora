@@ -17,6 +17,11 @@ DEFAULT_THRESHOLDS = {
     "watcher": 88,
     "earthquake": 92,
     "package": 86,
+    "purchase": 84,
+    "security": 90,
+    "school": 86,
+    "travel": 86,
+    "discord": 84,
     "system": 0,
 }
 
@@ -31,6 +36,11 @@ STRICT_MIN_THRESHOLDS = {
     "watcher": 88,
     "earthquake": 92,
     "package": 86,
+    "purchase": 84,
+    "security": 90,
+    "school": 86,
+    "travel": 86,
+    "discord": 84,
     "system": 0,
 }
 
@@ -57,6 +67,11 @@ TOPIC_LABELS = {
     "watcher": "Watchers",
     "earthquake": "Earthquakes",
     "package": "Packages",
+    "purchase": "Purchases",
+    "security": "Security",
+    "school": "School",
+    "travel": "Travel",
+    "discord": "Discord",
     "system": "Pulse",
 }
 
@@ -166,6 +181,11 @@ def load_config(test_config: dict | None = None) -> dict:
             "watcher": 240,
             "earthquake": 60,
             "package": 360,
+            "purchase": 360,
+            "security": 180,
+            "school": 240,
+            "travel": 180,
+            "discord": 240,
             "system": 0,
         }, **(_json("PULSE_NOTIFICATION_COOLDOWNS_JSON", {}) or {})},
         "NOTIFICATION_MAX_AGE": {**{
@@ -177,6 +197,11 @@ def load_config(test_config: dict | None = None) -> dict:
             "watcher": 720,
             "earthquake": 360,
             "package": 1440,
+            "purchase": 1440,
+            "security": 720,
+            "school": 1440,
+            "travel": 1440,
+            "discord": 720,
             "system": 1440,
         }, **(_json("PULSE_NOTIFICATION_MAX_AGE_JSON", {}) or {})},
         "ROLLING_NOTIFICATION_LIMITS": {**DEFAULT_ROLLING_NOTIFICATION_LIMITS, **(_json("PULSE_ROLLING_NOTIFICATION_LIMITS_JSON", {}) or {})},
@@ -222,6 +247,18 @@ def load_config(test_config: dict | None = None) -> dict:
         "PACKAGE_WATCHERS": _json("PULSE_PACKAGE_WATCHERS_JSON", []) or [],
         "COLOMBIA_RSS_URL": os.environ.get("PULSE_COLOMBIA_RSS_URL", ""),
         "SHORTCUT_TOKEN": os.environ.get("PULSE_SHORTCUT_TOKEN", ""),
+        "TOKEN_ENCRYPTION_KEY": os.environ.get("PULSE_TOKEN_ENCRYPTION_KEY", ""),
+        "AWS_REGION": os.environ.get("PULSE_AWS_REGION", "us-east-1"),
+        "AWS_ACCESS_KEY_ID": os.environ.get("PULSE_AWS_ACCESS_KEY_ID", ""),
+        "AWS_SECRET_ACCESS_KEY": os.environ.get("PULSE_AWS_SECRET_ACCESS_KEY", ""),
+        "BEDROCK_MODEL_ID": os.environ.get("PULSE_BEDROCK_MODEL_ID", "openai.gpt-5.6-luna"),
+        "BEDROCK_FALLBACK_MODEL_ID": os.environ.get("PULSE_BEDROCK_FALLBACK_MODEL_ID", ""),
+        "GOOGLE_CLIENT_ID": os.environ.get("PULSE_GOOGLE_CLIENT_ID", ""),
+        "GOOGLE_CLIENT_SECRET": os.environ.get("PULSE_GOOGLE_CLIENT_SECRET", ""),
+        "GOOGLE_REDIRECT_URI": os.environ.get("PULSE_GOOGLE_REDIRECT_URI", "https://pulse.moralife.uk/api/integrations/google/callback"),
+        "DISCORD_CLIENT_ID": os.environ.get("PULSE_DISCORD_CLIENT_ID", ""),
+        "DISCORD_CLIENT_SECRET": os.environ.get("PULSE_DISCORD_CLIENT_SECRET", ""),
+        "DISCORD_REDIRECT_URI": os.environ.get("PULSE_DISCORD_REDIRECT_URI", "https://pulse.moralife.uk/api/integrations/discord/callback"),
         "SESSION_SECRET": os.environ.get("PULSE_SECRET_KEY") or secrets.token_urlsafe(32),
     }
     if test_config:

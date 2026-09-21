@@ -325,6 +325,22 @@ def apply_preference_adjustments(candidate: dict, preferences: dict) -> dict:
     if source_weight:
         adjustment += max(-8, min(8, source_weight))
         reasons.append("source learning")
+    manual_weight = int((preferences.get("personal_priorities") or {}).get(candidate.get("topic"), 0))
+    manual_weight = max(-20, min(20, manual_weight))
+    if manual_weight:
+        adjustment += manual_weight
+        reasons.append("personal priority")
+    temporary = (preferences.get("temporary_priority") or {}).get(candidate.get("topic"))
+    if isinstance(temporary, dict):
+        try:
+            expires_at = datetime.fromisoformat(str(temporary.get("expires_at", "")).replace("Z", "+00:00"))
+            if expires_at > datetime.now(timezone.utc):
+                temporary_weight = max(-20, min(20, int(temporary.get("boost", 0))))
+                adjustment += temporary_weight
+                if temporary_weight:
+                    reasons.append("temporary priority")
+        except (TypeError, ValueError):
+            pass
     safety_floor = (candidate.get("metadata") or {}).get("safety_critical") or (int(candidate.get("score", 0)) >= 98 and candidate.get("topic") in {"weather", "earthquake"})
     if safety_floor and adjustment < 0:
         adjustment = max(0, adjustment)
