@@ -33,6 +33,9 @@ foreach ($name in @("pulse-phone-context", "pulse-action-runner")) {
   }
   & wsl.exe $binaryWsl "$repoWsl/pulse/shortcuts/$name.cherri" --hubsign --no-ansi --derive-uuids "--output=$buildWsl/$name.shortcut"
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output)) { throw "Cherri failed for $name" }
+  $displayName = if ($name -eq "pulse-phone-context") { "Pulse Phone Context" } else { "Pulse Action Runner" }
+  $unsigned = Join-Path $shortcutsRoot "${displayName}_unsigned.shortcut"
+  if (Test-Path $unsigned) { Move-Item -LiteralPath $unsigned -Destination (Join-Path $env:TEMP "$name-unsigned.shortcut") -Force }
   if ((Get-Item $output).Length -lt 1024) { throw "Cherri output is unexpectedly small for $name" }
   $kind = (& wsl.exe file "$buildWsl/$name.shortcut" | Out-String).Trim()
   if ($kind -notmatch "Apple|property list|data|binary") { throw "Output does not look like a Shortcut artifact: $kind" }
