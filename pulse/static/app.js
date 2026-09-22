@@ -2,6 +2,7 @@ const state = {
   config: null,
   authenticated: false,
   events: [],
+  plans: [],
   preferences: null,
   discovery: null,
   learning: null,
@@ -160,12 +161,13 @@ async function enableAlerts() {
 
 async function loadAuthenticatedState(options = {}) {
   const full = options.full ?? location.pathname.startsWith("/settings");
-  const [events, preferences, integrations] = await Promise.all([api("/api/events?limit=100"), api("/api/preferences"), api("/api/integrations")]);
+  const [events, preferences, integrations, plans] = await Promise.all([api("/api/events?limit=100"), api("/api/preferences"), api("/api/integrations"), api("/api/plans?status=proposed&limit=20")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
   state.integrations = integrations.integrations || [];
   state.context = integrations.context || [];
   state.devices = integrations.devices || [];
+  state.plans = plans.plans || [];
   if (full) {
     const [discovery, learning, audit, gameEvents] = await Promise.all([api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/game-events")]);
     state.discovery = discovery;
@@ -208,6 +210,13 @@ function alertCard() {
 function eventCard(event) {
   const confidence = event.metadata?.confidence || "direct";
   return `<button class="event-card" data-event-id="${escapeHtml(event.id)}"><span class="event-glyph topic-${escapeHtml(event.topic)}">${topicGlyph(event.topic)}</span><span class="event-card-copy"><span class="event-card-top"><span class="topic topic-${escapeHtml(event.topic)}">${escapeHtml(topicLabel(event.topic))}</span><span class="event-time">${escapeHtml(formatDate(event.published_at || event.discovered_at))}</span></span><h3>${escapeHtml(event.title)}</h3><p>${escapeHtml(event.body || event.summary || "Open for details")}</p><span class="event-card-bottom"><span class="priority priority-${escapeHtml(event.priority)}">${escapeHtml(event.priority)}</span><span class="confidence confidence-${escapeHtml(confidence)}">${escapeHtml(confidence)}</span></span></span></button>`;
+}
+
+function plansCard() {
+  const plans = (state.plans || []).filter((item) => item.status === "proposed");
+  if (!plans.length) return "";
+  const rows = plans.slice(0, 3).map((plan) => `<div class="source-row"><span><strong>${escapeHtml(plan.title)}</strong><small>${escapeHtml(formatDate(plan.start_at))}${plan.location ? ` · ${escapeHtml(plan.location)}` : ""} · ${Math.round(Number(plan.confidence || 0) * 100)}% confidence</small></span><span class="provider-actions"><button class="button secondary" data-action="approve-plan" data-plan-id="${escapeHtml(plan.id)}">add</button><button class="button ghost-button" data-action="reject-plan" data-plan-id="${escapeHtml(plan.id)}">dismiss</button></span></div>`).join("");
+  return `<section class="provider-card"><div class="eyebrow">possible plans</div><h2>things Pulse noticed</h2><p class="provider-note">nothing is added to your calendar without your approval.</p><div class="source-list">${rows}</div></section>`;
 }
 
 function rulesCard() {
@@ -359,7 +368,7 @@ function renderHome() {
   const historyAction = state.events.length > importantEvents.length ? `<button class="button ghost-button full" data-action="show-history">${state.showAllHistory ? "show important only" : `show all ${state.events.length} saved events`}</button>` : "";
   const topics = ["all", ...new Set(importantEvents.map((item) => item.topic))];
   const topicFilters = topics.map((topic) => `<button class="topic-filter ${state.activeTopic === topic ? "active" : ""}" data-action="filter-topic" data-topic="${escapeHtml(topic)}">${topic === "all" ? "for you" : escapeHtml(topicLabel(topic))}</button>`).join("");
-  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">${greeting()} · aiden</span><h1>your pulse</h1><p>only the signals worth your attention.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}<section class="feed-head"><div><span class="eyebrow">your signal layer</span><h2>${state.activeTopic === "all" ? "for you" : escapeHtml(topicLabel(state.activeTopic))}</h2></div><span class="muted">${state.showAllHistory ? "history" : "now"}</span></section><div class="topic-filters" aria-label="Filter signals">${topicFilters}</div><section class="event-list">${events}</section>${historyAction}<p class="footer-note">quiet by default · private by design</p>`;
+  app.innerHTML = `<section class="home-hero"><div><span class="eyebrow">${greeting()} · aiden</span><h1>your pulse</h1><p>only the signals worth your attention.</p></div><button class="icon-button" data-action="logout" aria-label="Log out">↗</button></section><section class="signal-strip"><span><strong>${urgent}</strong> important</span><span><strong>${state.events.length}</strong> saved</span><span class="mode-pill">${escapeHtml(activeMode)}</span></section>${alertCard()}${plansCard()}<section class="feed-head"><div><span class="eyebrow">your signal layer</span><h2>${state.activeTopic === "all" ? "for you" : escapeHtml(topicLabel(state.activeTopic))}</h2></div><span class="muted">${state.showAllHistory ? "history" : "now"}</span></section><div class="topic-filters" aria-label="Filter signals">${topicFilters}</div><section class="event-list">${events}</section>${historyAction}<p class="footer-note">quiet by default · private by design</p>`;
 }
 
 function renderSettings() {
@@ -495,6 +504,8 @@ document.addEventListener("click", async (event) => {
       return;
     }
     if (action === "enable-alerts") await enableAlerts();
+    if (action === "approve-plan") { const planId = event.target.closest("[data-plan-id]")?.dataset.planId; const result = await api(`/api/plans/${encodeURIComponent(planId)}/approve`, { method: "POST", body: "{}" }); await loadAuthenticatedState(); renderHome(); showToast(result.ok ? "added to Google Calendar" : "calendar action failed", !result.ok); }
+    if (action === "reject-plan") { const planId = event.target.closest("[data-plan-id]")?.dataset.planId; await api(`/api/plans/${encodeURIComponent(planId)}/reject`, { method: "POST", body: "{}" }); await loadAuthenticatedState(); renderHome(); showToast("plan dismissed"); }
     if (action === "test-push") { const result = await api("/api/push/test", { method: "POST", body: "{}" }); showToast(result.delivery?.sent ? "test sent" : "test event saved; delivery is not configured"); }
     if (action === "source-click") { void api(`/api/events/${encodeURIComponent(event.target.closest("[data-event-id]")?.dataset.eventId || state.detail?.id)}/source-clicked`, { method: "POST", body: "{}" }); return; }
     if (action === "logout") { await api("/api/auth/logout", { method: "POST", body: "{}" }); state.authenticated = false; render(); }

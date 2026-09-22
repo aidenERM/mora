@@ -16,8 +16,9 @@ from pulse_app.config import load_config
 from pulse_app.rules import apply_preference_adjustments, domain_adjustment, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.worker import _integration_failure_candidate, _integration_failure_transition
 from pulse_app.sources import parse_feed
+from pulse_app.actions import extract_plan_candidate
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
-from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
+from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, list_plan_candidates, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -172,7 +173,7 @@ def test_google_authorization_requests_enabled_apis():
     from urllib.parse import parse_qs, urlparse
     query = parse_qs(urlparse(google_authorization_url({"GOOGLE_CLIENT_ID": "client", "GOOGLE_REDIRECT_URI": "https://pulse.moralife.uk/api/integrations/google/callback"}, "state" )).query)
     assert "https://www.googleapis.com/auth/gmail.readonly" in query["scope"][0]
-    assert "https://www.googleapis.com/auth/calendar.readonly" in query["scope"][0]
+    assert "https://www.googleapis.com/auth/calendar.events" in query["scope"][0]
     assert "https://www.googleapis.com/auth/contacts.readonly" in query["scope"][0]
 
 
@@ -183,6 +184,52 @@ def test_icloud_normalization_reuses_mail_classification():
     assert calendar["event_id"] == "event-1" and calendar["calendar"] == "Family"
     assert contact["name"] == "Aiden" and contact["importance"] == "important"
     assert mail["topic"] == "package"
+
+
+def test_plan_extraction_requires_real_time_and_persists(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({"DATABASE_PATH": str(database), "TIMEZONE": "America/Bogota"})
+    plan = extract_plan_candidate({"id": "m1", "subject": "Gaming Friday at 8 PM", "snippet": "let's play Warzone"}, "gmail", config, "gmail-event-1")
+    assert plan and plan["action_type"] == "calendar_event"
+    from pulse_app.actions import save_extracted_plan
+    save_extracted_plan(conn, plan)
+    conn.commit()
+    saved = list_plan_candidates(conn, "proposed")
+    assert len(saved) == 1 and saved[0]["source_event_id"] == "gmail-event-1"
+    assert extract_plan_candidate({"id": "m2", "subject": "quick question", "snippet": "let's talk sometime"}, "gmail", config) is None
+
+
+def test_plan_rejection_is_authenticated_and_reversible_state(tmp_path):
+    client = make_client(tmp_path)
+    login(client)
+    database = tmp_path / "pulse.sqlite3"
+    conn = connect(database)
+    plan = extract_plan_candidate({"id": "m3", "subject": "Meet Friday at 8 PM", "snippet": "let's meet"}, "gmail", load_config({"DATABASE_PATH": str(database)}), "event-3")
+    from pulse_app.actions import save_extracted_plan
+    save_extracted_plan(conn, plan)
+    conn.commit()
+    result = client.get("/api/plans?status=proposed")
+    assert result.status_code == 200 and result.json["plans"][0]["id"] == plan["id"]
+    rejected = client.post(f"/api/plans/{plan['id']}/reject", json={})
+    assert rejected.status_code == 200 and rejected.json["plan"]["status"] == "rejected"
+
+
+def test_plan_approval_uses_confirmed_calendar_action(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    login(client)
+    database = tmp_path / "pulse.sqlite3"
+    conn = connect(database)
+    plan = extract_plan_candidate({"id": "m4", "subject": "Meet Friday at 8 PM", "snippet": "let's meet"}, "gmail", load_config({"DATABASE_PATH": str(database)}), "event-4")
+    from pulse_app.actions import save_extracted_plan
+    save_extracted_plan(conn, plan)
+    conn.commit()
+    monkeypatch.setattr("pulse_app.app.create_google_calendar_event", lambda *_args: {"provider": "google-calendar", "event_id": "calendar-1", "html_link": "https://calendar.google.test/event-1"})
+    result = client.post(f"/api/plans/{plan['id']}/approve", json={})
+    assert result.status_code == 200
+    assert result.json["plan"]["status"] == "executed"
+    assert result.json["action"]["status"] == "completed"
 
 
 def test_shortcut_setup_and_authentication(tmp_path):

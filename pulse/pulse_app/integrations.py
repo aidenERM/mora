@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urljoin
 import requests
 
 from .rules import annotate_candidate, apply_preference_adjustments, priority_for, score_item
+from .actions import extract_plan_candidate, save_extracted_plan
 from .bedrock import validate_config
 from .storage import (
     connect,
@@ -50,7 +51,7 @@ PROVIDERS = {
     "discord": "Discord",
     "aws-bedrock": "AWS Bedrock AI",
 }
-GOOGLE_SCOPES = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/contacts.readonly"
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/contacts.readonly"
 
 
 def _now() -> datetime:
@@ -354,6 +355,23 @@ def _google_get(token: str, url: str, params: dict | None = None) -> dict:
     return response.json()
 
 
+def create_google_calendar_event(conn, config: dict, plan: dict) -> dict:
+    token = _google_token(conn, config)
+    action = plan.get("action_payload") or {}
+    payload = {
+        "summary": str(action.get("summary") or plan.get("title") or "Pulse plan")[:240],
+        "description": str(action.get("description") or plan.get("summary") or "")[:2000],
+        "location": str(action.get("location") or plan.get("location") or "")[:240],
+        "start": {"dateTime": plan["start_at"], "timeZone": config.get("TIMEZONE", "America/Bogota")},
+        "end": {"dateTime": plan["end_at"], "timeZone": config.get("TIMEZONE", "America/Bogota")},
+        "visibility": "private",
+    }
+    response = requests.post("https://www.googleapis.com/calendar/v3/calendars/primary/events", headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, json=payload, timeout=15)
+    response.raise_for_status()
+    value = response.json()
+    return {"provider": "google-calendar", "event_id": value.get("id", ""), "html_link": value.get("htmlLink", "")}
+
+
 def _icloud_credentials(conn, config: dict) -> dict:
     stored = load_credential(conn, "icloud") or {}
     apple_id = stored.get("apple_id") or config.get("ICLOUD_APPLE_ID", "")
@@ -556,6 +574,9 @@ def _sync_icloud_mail(conn, config: dict, credentials: dict) -> dict:
             item["important_person"] = important_person_for(conn, item.get("sender", ""))
             item["message_id"] = "icloud:" + uid.decode(errors="ignore")
             stored, was_created = upsert_event(conn, _apple_mail_event(item, config, preferences, active_context(conn)))
+            plan = extract_plan_candidate(item, "apple-mail", config, stored["id"])
+            if plan:
+                save_extracted_plan(conn, plan)
             created += int(was_created)
         mark_success(conn, "apple-mail", {"messages_checked": len(uids), "created": created})
         return {"messages_checked": len(uids), "created": created}
@@ -651,6 +672,9 @@ def sync_google(conn, config: dict) -> dict:
         classified["lifecycle"] = persist_gmail_lifecycle(conn, classified)
         event = _gmail_event(classified, config, preferences, active_context(conn))
         stored, was_created = upsert_event(conn, event)
+        plan = extract_plan_candidate({**classified, "message_id": classified.get("message_id", item.get("id", ""))}, "gmail", config, stored["id"])
+        if plan:
+            save_extracted_plan(conn, plan)
         created += int(was_created)
     calendar = _google_get(token, "https://www.googleapis.com/calendar/v3/calendars/primary/events", {"maxResults": 20, "singleEvents": "true", "orderBy": "startTime", "timeMin": _iso()})
     for item in calendar.get("items", []):

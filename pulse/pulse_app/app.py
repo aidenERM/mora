@@ -54,6 +54,11 @@ from .storage import (
     list_purchases,
     set_purchase_watch,
     list_game_events,
+    list_plan_candidates,
+    get_plan_candidate,
+    update_plan_candidate,
+    create_action_proposal,
+    update_action_proposal,
     upsert_game_event,
     upsert_event,
 )
@@ -73,6 +78,7 @@ from .integrations import (
     sync_provider,
     normalize_companion_payload,
     normalize_location_payload,
+    create_google_calendar_event,
 )
 from .storage import companion_device, create_pairing_challenge, list_companion_devices, redeem_pairing_challenge, save_integration, set_context_signal, update_companion_metadata
 
@@ -557,6 +563,44 @@ def create_app(test_config: dict | None = None) -> Flask:
         except ValueError:
             limit = 30
         return jsonify(events=list_events(db(), limit, request.args.get("topic")))
+
+    @app.get("/api/plans")
+    @require_auth
+    def plans():
+        status = str(request.args.get("status", "")).strip() or None
+        return jsonify(plans=list_plan_candidates(db(), status, request.args.get("limit", "50")))
+
+    @app.post("/api/plans/<plan_id>/approve")
+    @require_auth
+    def plan_approve(plan_id: str):
+        plan = get_plan_candidate(db(), plan_id)
+        if not plan:
+            return jsonify(error="not_found"), 404
+        if plan["status"] not in {"proposed", "approved"}:
+            return jsonify(error="plan_not_actionable"), 409
+        action = create_action_proposal(db(), plan, risk="confirm")
+        try:
+            if plan["action_type"] != "calendar_event":
+                raise ValueError("unsupported_action")
+            result = create_google_calendar_event(db(), config, plan)
+            action = update_action_proposal(db(), action["id"], "completed", result)
+            update_plan_candidate(db(), plan_id, "executed")
+            db().commit()
+            return jsonify(ok=True, plan=get_plan_candidate(db(), plan_id), action=action)
+        except Exception as exc:
+            action = update_action_proposal(db(), action["id"], "failed", error=type(exc).__name__)
+            update_plan_candidate(db(), plan_id, "approved")
+            db().commit()
+            return jsonify(error="action_failed", detail="calendar action failed; reconnect Google if needed", plan=get_plan_candidate(db(), plan_id), action=action), 502
+
+    @app.post("/api/plans/<plan_id>/reject")
+    @require_auth
+    def plan_reject(plan_id: str):
+        plan = update_plan_candidate(db(), plan_id, "rejected")
+        if not plan:
+            return jsonify(error="not_found"), 404
+        db().commit()
+        return jsonify(ok=True, plan=plan)
 
     @app.get("/api/packages")
     @require_auth

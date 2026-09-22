@@ -251,11 +251,97 @@ CREATE TABLE IF NOT EXISTS event_actions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_event_actions_event ON event_actions(event_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS plan_candidates (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    location TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    action_type TEXT NOT NULL DEFAULT 'calendar_event',
+    action_payload TEXT NOT NULL DEFAULT '{}',
+    provenance TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_plan_candidates_status ON plan_candidates(status, start_at);
+CREATE TABLE IF NOT EXISTS action_proposals (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    risk TEXT NOT NULL DEFAULT 'confirm',
+    payload TEXT NOT NULL DEFAULT '{}',
+    result TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    executed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_action_proposals_status ON action_proposals(status, updated_at DESC);
 """
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def upsert_plan_candidate(conn: sqlite3.Connection, plan: dict) -> dict:
+    now = utc_now()
+    conn.execute(
+        """INSERT INTO plan_candidates(id,source,source_event_id,title,summary,start_at,end_at,location,confidence,status,action_type,action_payload,provenance,created_at,updated_at,expires_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET source_event_id=excluded.source_event_id,title=excluded.title,summary=excluded.summary,start_at=excluded.start_at,end_at=excluded.end_at,location=excluded.location,confidence=excluded.confidence,action_payload=excluded.action_payload,provenance=excluded.provenance,updated_at=excluded.updated_at""",
+        (plan["id"], plan.get("source", ""), plan.get("source_event_id", ""), plan.get("title", "Possible plan")[:240], plan.get("summary", "")[:700], plan["start_at"], plan["end_at"], plan.get("location", "")[:240], float(plan.get("confidence", 0)), plan.get("status", "proposed"), plan.get("action_type", "calendar_event"), json.dumps(plan.get("action_payload", {}), separators=(",", ":")), json.dumps(plan.get("provenance", {}), separators=(",", ":")), now, now, plan.get("expires_at")),
+    )
+    return get_plan_candidate(conn, plan["id"])
+
+
+def get_plan_candidate(conn: sqlite3.Connection, plan_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM plan_candidates WHERE id=?", (plan_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    for key in ("action_payload", "provenance"):
+        item[key] = _safe_json(item.get(key), {})
+    return item
+
+
+def list_plan_candidates(conn: sqlite3.Connection, status: str | None = None, limit: int = 50) -> list[dict]:
+    limit = max(1, min(200, int(limit)))
+    if status:
+        rows = conn.execute("SELECT * FROM plan_candidates WHERE status=? ORDER BY start_at LIMIT ?", (status, limit)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM plan_candidates ORDER BY start_at LIMIT ?", (limit,)).fetchall()
+    return [get_plan_candidate(conn, row["id"]) for row in rows]
+
+
+def update_plan_candidate(conn: sqlite3.Connection, plan_id: str, status: str) -> dict | None:
+    if status not in {"proposed", "approved", "rejected", "executed", "expired"}:
+        raise ValueError("invalid plan status")
+    conn.execute("UPDATE plan_candidates SET status=?,updated_at=? WHERE id=?", (status, utc_now(), plan_id))
+    return get_plan_candidate(conn, plan_id)
+
+
+def create_action_proposal(conn: sqlite3.Connection, plan: dict, risk: str = "confirm") -> dict:
+    now = utc_now()
+    action_id = "action-" + secrets.token_urlsafe(18)
+    conn.execute("INSERT INTO action_proposals(id,plan_id,action_type,status,risk,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (action_id, plan["id"], plan.get("action_type", "calendar_event"), "pending", risk, json.dumps(plan.get("action_payload", {}), separators=(",", ":")), now, now))
+    row = conn.execute("SELECT * FROM action_proposals WHERE id=?", (action_id,)).fetchone()
+    return dict(row)
+
+
+def update_action_proposal(conn: sqlite3.Connection, action_id: str, status: str, result: dict | None = None, error: str = "") -> dict | None:
+    now = utc_now()
+    executed_at = now if status in {"completed", "failed"} else None
+    conn.execute("UPDATE action_proposals SET status=?,result=?,error=?,updated_at=?,executed_at=? WHERE id=?", (status, json.dumps(result or {}, separators=(",", ":")), error[:240], now, executed_at, action_id))
+    row = conn.execute("SELECT * FROM action_proposals WHERE id=?", (action_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def _safe_json(value, fallback=None):
