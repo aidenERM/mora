@@ -59,11 +59,13 @@ from .storage import (
     update_plan_candidate,
     create_action_proposal,
     update_action_proposal,
+    create_capture,
     upsert_game_event,
     upsert_event,
 )
 from .worker import _payload
 from .bedrock import classify_or_fallback, validate_config
+from .actions import extract_plan_candidate, save_extracted_plan
 from .integrations import (
     PROVIDERS,
     active_context,
@@ -442,14 +444,14 @@ def create_app(test_config: dict | None = None) -> Flask:
         token = shortcut_token()
         if not token:
             return jsonify(error="shortcut_not_configured"), 503
-        return jsonify(endpoint=config["APP_URL"] + "/api/shortcut/context", token=token)
+        return jsonify(endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", token=token)
 
     @app.post("/api/shortcut/token/rotate")
     @require_auth
     def shortcut_rotate():
         token = secrets.token_urlsafe(32)
         save_credential(db(), "shortcut", {"token": token})
-        return jsonify(ok=True, endpoint=config["APP_URL"] + "/api/shortcut/context", token=token)
+        return jsonify(ok=True, endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", token=token)
 
     @app.post("/api/location")
     @require_auth
@@ -569,6 +571,25 @@ def create_app(test_config: dict | None = None) -> Flask:
     def plans():
         status = str(request.args.get("status", "")).strip() or None
         return jsonify(plans=list_plan_candidates(db(), status, request.args.get("limit", "50")))
+
+    def receive_capture(source: str):
+        body = _json_body()
+        title = str(body.get("title") or body.get("subject") or "").strip()[:240]
+        text = str(body.get("text") or body.get("body") or body.get("content") or "").strip()[:12000]
+        url = str(body.get("url") or "").strip()[:1000]
+        if not title and not text and not url:
+            return jsonify(error="capture_content_required"), 400
+        plan = extract_plan_candidate({"id": body.get("id", ""), "subject": title, "snippet": text, "url": url}, source, config)
+        if plan:
+            plan = save_extracted_plan(db(), plan)
+        capture = create_capture(db(), {"source": source, "title": title, "body": text, "url": url, "metadata": {"shared": True}, "plan_id": plan["id"] if plan else ""})
+        db().commit()
+        return jsonify(ok=True, capture=capture, plan=plan), 201
+
+    @app.post("/api/capture")
+    @require_auth
+    def capture():
+        return receive_capture(str(_json_body().get("source") or "share_sheet"))
 
     @app.post("/api/plans/<plan_id>/approve")
     @require_auth
@@ -965,6 +986,13 @@ def create_app(test_config: dict | None = None) -> Flask:
         _store_context_payload(db(), payload, "shortcut")
         db().commit()
         return jsonify(ok=True, context=active_context(db()))
+
+    @app.post("/api/shortcut/capture")
+    def shortcut_capture():
+        token = shortcut_token()
+        if not token or request.headers.get("X-Pulse-Shortcut-Token") != token:
+            return jsonify(error="shortcut_not_configured"), 403
+        return receive_capture(str(_json_body().get("source") or "ios_share_sheet"))
 
     @app.post("/api/webhooks/github")
     def github_webhook():

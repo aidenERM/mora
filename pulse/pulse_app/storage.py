@@ -284,6 +284,17 @@ CREATE TABLE IF NOT EXISTS action_proposals (
     executed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_proposals_status ON action_proposals(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS pulse_captures (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    plan_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pulse_captures_recent ON pulse_captures(created_at DESC);
 """
 
 
@@ -342,6 +353,19 @@ def update_action_proposal(conn: sqlite3.Connection, action_id: str, status: str
     conn.execute("UPDATE action_proposals SET status=?,result=?,error=?,updated_at=?,executed_at=? WHERE id=?", (status, json.dumps(result or {}, separators=(",", ":")), error[:240], now, executed_at, action_id))
     row = conn.execute("SELECT * FROM action_proposals WHERE id=?", (action_id,)).fetchone()
     return dict(row) if row else None
+
+
+def create_capture(conn: sqlite3.Connection, capture: dict) -> dict:
+    capture_id = str(capture.get("id") or "capture-" + secrets.token_urlsafe(16))
+    now = utc_now()
+    conn.execute(
+        "INSERT INTO pulse_captures(id,source,title,body,url,metadata,plan_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (capture_id, str(capture.get("source") or "share_sheet")[:40], str(capture.get("title") or "")[:240], str(capture.get("body") or "")[:12000], str(capture.get("url") or "")[:1000], json.dumps(capture.get("metadata") or {}, separators=(",", ":")), str(capture.get("plan_id") or "")[:120], now),
+    )
+    row = conn.execute("SELECT * FROM pulse_captures WHERE id=?", (capture_id,)).fetchone()
+    item = dict(row)
+    item["metadata"] = _safe_json(item.get("metadata"), {})
+    return item
 
 
 def _safe_json(value, fallback=None):

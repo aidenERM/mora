@@ -241,6 +241,19 @@ def test_shortcut_setup_and_authentication(tmp_path):
     assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
 
 
+def test_shortcut_capture_preserves_shared_context_and_extracts_plan(tmp_path):
+    client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
+    result = client.post(
+        "/api/shortcut/capture",
+        json={"source": "instagram", "title": "Gaming Friday at 8 PM", "text": "let's play Warzone tomorrow", "url": "https://instagram.test/p/1"},
+        headers={"X-Pulse-Shortcut-Token": "shortcut-test-token"},
+    )
+    assert result.status_code == 201
+    assert result.json["capture"]["source"] == "instagram"
+    assert result.json["plan"]["action_type"] == "calendar_event"
+    assert client.post("/api/shortcut/capture", json={"text": "private"}, headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
+
+
 def test_bedrock_structured_validation(monkeypatch):
     from pulse_app import bedrock
 

@@ -3,6 +3,12 @@
 Pulse accepts short-lived, derived context through `POST /api/shortcut/context`.
 Keep the token in the Shortcut only; never commit the real token to this repo.
 
+The same token can send an intentional share from Instagram, WhatsApp, TikTok,
+or any other app through `POST /api/shortcut/capture` with `source`, `title`,
+`text`, and optional `url`. Pulse stores the capture and only proposes a
+calendar action when it can identify a concrete date and time. It never reads
+private chat history or scrapes those apps.
+
 Recommended automations on iPhone:
 
 - opening Pulse: send current mode, coarse location, battery, and charging
