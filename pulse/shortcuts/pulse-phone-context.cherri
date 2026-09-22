@@ -1,34 +1,27 @@
-/*
-   Thin optional Shortcut for Pulse.
+#define name Pulse Phone Context
+#include 'actions/scripting'
+#question pulseToken "Paste your Pulse Shortcut token" ""
 
-   The server owns source rules, quiet hours, and relevance. This Shortcut only
-   sends current phone context to the server and displays the returned result.
-   Replace the token before compiling. Do not commit a real token.
-*/
-#include 'actions/device'
-#include 'actions/location'
-#include 'actions/web'
-
-#define name Pulse phone context
-#define color blue
-
-const currentLocationValue = getCurrentLocation()
-const latitude = getLocationDetail(currentLocationValue, 'Latitude')
-const longitude = getLocationDetail(currentLocationValue, 'Longitude')
-const context = {
-  "mode": "home",
-  "physical_context": "home",
-  "state": "awake",
-  "confidence": 0.8,
-  "signals": {
-    "battery": {"level": getBatteryLevel(), "charging": isCharging()},
-    "location": {"latitude": latitude, "longitude": longitude}
+@token = text(pulseToken)
+@headers = {"X-Pulse-Shortcut-Token": "PLACEHOLDER"}
+setValue(@headers, "X-Pulse-Shortcut-Token", @token)
+@battery = rawAction("is.workflow.actions.getbatterylevel")
+@charging = rawAction("is.workflow.actions.ischarging")
+@location = rawAction("is.workflow.actions.currentlocation")
+@response = rawAction("is.workflow.actions.downloadurl", {
+  "WFURL": "https://pulse.moralife.uk/api/shortcut/context",
+  "WFHTTPMethod": "POST",
+  "WFHTTPHeaders": "${@headers}",
+  "WFHTTPBodyType": "JSON",
+  "WFJSONValues": {
+    "mode": "unknown",
+    "physical_context": "unknown",
+    "state": "awake",
+    "confidence": 0.6,
+    "signals": {
+      "battery": {"level": "${@battery}", "charging": "${@charging}"},
+      "location": "${@location}"
+    }
   }
-}
-const response = jsonRequest(
-  "https://pulse.moralife.uk/api/shortcut/context",
-  "POST",
-  context,
-  {"X-Pulse-Shortcut-Token": "REPLACE_WITH_SHORTCUT_TOKEN"}
-)
-show(response)
+})
+show(@response)

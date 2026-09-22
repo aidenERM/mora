@@ -1,44 +1,111 @@
-/*
-  Pulse Action Runner.
-
-  HUMAN CHECK: this source is intentionally kept as an import template until
-  Cherri can be run on macOS/iPhone and native Calendar/Reminders action names
-  are verified. It is not presented by Pulse as an installable signed Shortcut.
-
-  The server only returns the allowlisted action types documented below. The
-  Shortcut must never evaluate arbitrary server text as a command.
-*/
-#include 'actions/calendar'
-#include 'actions/reminders'
-#include 'actions/web'
-
 #define name Pulse Action Runner
-#define color blue
+#include 'actions/scripting'
+#question pulseToken "Paste your Pulse Shortcut token" ""
 
-const pulseURL = "https://pulse.moralife.uk"
-const pulseToken = "REPLACE_WITH_SHORTCUT_TOKEN"
-const headers = {"X-Pulse-Shortcut-Token": pulseToken}
-const pending = jsonRequest(pulseURL + "/api/shortcut/actions/next", "GET", {}, headers)
-const action = pending.action
+@token = text(pulseToken)
+@headers = {"X-Pulse-Shortcut-Token": "PLACEHOLDER"}
+setValue(@headers, "X-Pulse-Shortcut-Token", @token)
 
-if (action) {
-  const claimed = jsonRequest(pulseURL + "/api/shortcut/actions/" + action.id + "/claim", "POST", {}, headers)
-  if (claimed.action) {
-    const actionHeaders = {"X-Pulse-Shortcut-Token": pulseToken, "X-Pulse-Action-Claim": claimed.action.claim_token}
-    if (action.action_type == "create_calendar_event") {
-      const created = addCalendarEvent(action.payload.title, action.payload.start, action.payload.end, action.payload.location, action.payload.notes, action.payload.calendar_name)
-      jsonRequest(pulseURL + "/api/shortcut/actions/" + action.id + "/complete", "POST", {"result": {"event_identifier": created.identifier}}, actionHeaders)
-    } else if (action.action_type == "create_reminder") {
-      const created = addReminder(action.payload.title, action.payload.due, action.payload.list, action.payload.notes, action.payload.priority)
-      jsonRequest(pulseURL + "/api/shortcut/actions/" + action.id + "/complete", "POST", {"result": {"reminder_identifier": created.identifier}}, actionHeaders)
-    } else if (action.action_type == "open_url") {
-      openURL(action.payload.url)
-      jsonRequest(pulseURL + "/api/shortcut/actions/" + action.id + "/complete", "POST", {"result": {"opened": true}}, actionHeaders)
-    } else if (action.action_type == "refresh_context") {
-      jsonRequest(pulseURL + "/api/shortcut/context", "POST", {"mode": "unknown", "state": "awake", "confidence": 0.6, "signals": {"shortcut": {"runner": true}}}, headers)
-      jsonRequest(pulseURL + "/api/shortcut/actions/" + action.id + "/complete", "POST", {"result": {"context_sent": true}}, actionHeaders)
+@pending = rawAction("is.workflow.actions.downloadurl", {
+  "WFURL": "https://pulse.moralife.uk/api/shortcut/actions/next",
+  "WFHTTPMethod": "GET",
+  "WFHTTPHeaders": "${@headers}"
+})
+@pendingJSON = getDictionary(@pending)
+@action = getDictionary(@pendingJSON['action'])
+@actionID: text
+@actionID = @action['id']
+
+if @actionID != "" {
+  @claimURL = "https://pulse.moralife.uk/api/shortcut/actions/{@actionID}/claim"
+  @claim = rawAction("is.workflow.actions.downloadurl", {
+    "WFURL": "{@claimURL}",
+    "WFHTTPMethod": "POST",
+    "WFHTTPHeaders": "${@headers}",
+    "WFHTTPBodyType": "JSON",
+    "WFJSONValues": {}
+  })
+  @claimJSON = getDictionary(@claim)
+  @claimed = getDictionary(@claimJSON['action'])
+  @claimToken: text
+  @claimToken = @claimed['claim_token']
+
+  if @claimToken != "" {
+    @actionHeaders = {"X-Pulse-Shortcut-Token": "{@token}", "X-Pulse-Action-Claim": "{@claimToken}"}
+    @payload = @action['payload']
+    @actionType: text
+    @actionType = @action['action_type']
+
+    if @actionType == "create_calendar_event" {
+      rawAction("is.workflow.actions.createevent", {
+        "WFCalendarEventTitle": "{@payload['title']}",
+        "WFCalendarEventStartDate": "{@payload['start']}",
+        "WFCalendarEventEndDate": "{@payload['end']}",
+        "WFCalendarEventLocation": "{@payload['location']}",
+        "WFCalendarEventNotes": "{@payload['notes']}",
+        "WFCalendarEventCalendar": "{@payload['calendar_name']}"
+      })
+      @result = {"event_identifier": "created-by-pulse"}
+      @completeURL = "https://pulse.moralife.uk/api/shortcut/actions/{@actionID}/complete"
+      rawAction("is.workflow.actions.downloadurl", {
+        "WFURL": "{@completeURL}",
+        "WFHTTPMethod": "POST",
+        "WFHTTPHeaders": "${@actionHeaders}",
+        "WFHTTPBodyType": "JSON",
+        "WFJSONValues": {"result": "${@result}"}
+      })
+    } else if @actionType == "create_reminder" {
+      rawAction("is.workflow.actions.reminders", {
+        "WFReminderTitle": "{@payload['title']}",
+        "WFReminderDueDate": "{@payload['due']}",
+        "WFReminderNotes": "{@payload['notes']}",
+        "WFReminderPriority": "{@payload['priority']}",
+        "WFReminderList": "{@payload['list']}"
+      })
+      @result = {"reminder_identifier": "created-by-pulse"}
+      @completeURL = "https://pulse.moralife.uk/api/shortcut/actions/{@actionID}/complete"
+      rawAction("is.workflow.actions.downloadurl", {
+        "WFURL": "{@completeURL}",
+        "WFHTTPMethod": "POST",
+        "WFHTTPHeaders": "${@actionHeaders}",
+        "WFHTTPBodyType": "JSON",
+        "WFJSONValues": {"result": "${@result}"}
+      })
+    } else if @actionType == "open_url" {
+      rawAction("is.workflow.actions.openurl", {"WFURL": "{@payload['url']}"})
+      @completeURL = "https://pulse.moralife.uk/api/shortcut/actions/{@actionID}/complete"
+      rawAction("is.workflow.actions.downloadurl", {
+        "WFURL": "{@completeURL}",
+        "WFHTTPMethod": "POST",
+        "WFHTTPHeaders": "${@actionHeaders}",
+        "WFHTTPBodyType": "JSON",
+        "WFJSONValues": {"result": {"opened": true}}
+      })
+    } else if @actionType == "refresh_context" {
+      rawAction("is.workflow.actions.downloadurl", {
+        "WFURL": "https://pulse.moralife.uk/api/shortcut/context",
+        "WFHTTPMethod": "POST",
+        "WFHTTPHeaders": "${@headers}",
+        "WFHTTPBodyType": "JSON",
+        "WFJSONValues": {"mode": "unknown", "state": "awake", "confidence": 0.6, "signals": {"shortcut": {"runner": true}}}
+      })
+      @completeURL = "https://pulse.moralife.uk/api/shortcut/actions/{@actionID}/complete"
+      rawAction("is.workflow.actions.downloadurl", {
+        "WFURL": "{@completeURL}",
+        "WFHTTPMethod": "POST",
+        "WFHTTPHeaders": "${@actionHeaders}",
+        "WFHTTPBodyType": "JSON",
+        "WFJSONValues": {"result": {"context_sent": true}}
+      })
     } else {
-      jsonRequest(pulseURL + "/api/shortcut/actions/" + action.id + "/fail", "POST", {"error": "unsupported_action_type"}, actionHeaders)
+      @failURL = "https://pulse.moralife.uk/api/shortcut/actions/{@actionID}/fail"
+      rawAction("is.workflow.actions.downloadurl", {
+        "WFURL": "{@failURL}",
+        "WFHTTPMethod": "POST",
+        "WFHTTPHeaders": "${@actionHeaders}",
+        "WFHTTPBodyType": "JSON",
+        "WFJSONValues": {"error": "unsupported_action_type"}
+      })
     }
   }
 }

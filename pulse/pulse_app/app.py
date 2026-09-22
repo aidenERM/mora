@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, make_response, redirect, request, send_from_directory, session
+from flask import Flask, jsonify, make_response, redirect, request, send_file, send_from_directory, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -464,20 +464,51 @@ def create_app(test_config: dict | None = None) -> Flask:
         token = shortcut_token()
         if not token:
             return jsonify(error="shortcut_not_configured"), 503
-        return jsonify(endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", runner_source_endpoint=config["APP_URL"] + "/api/shortcut/runner-source", token=token)
+        base = config["APP_URL"]
+        return jsonify(
+            endpoint=base + "/api/shortcut/context",
+            capture_endpoint=base + "/api/shortcut/capture",
+            runner_artifact_endpoint=base + "/api/shortcut/artifacts/action-runner",
+            context_artifact_endpoint=base + "/api/shortcut/artifacts/phone-context",
+            runner_source_endpoint=base + "/api/shortcut/runner-source",
+            context_source_endpoint=base + "/api/shortcut/context-source",
+            token=token,
+        )
 
     @app.post("/api/shortcut/token/rotate")
     @require_auth
     def shortcut_rotate():
         token = secrets.token_urlsafe(32)
         save_credential(db(), "shortcut", {"token": token})
-        return jsonify(ok=True, endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", runner_source_endpoint=config["APP_URL"] + "/api/shortcut/runner-source", token=token)
+        base = config["APP_URL"]
+        return jsonify(ok=True, endpoint=base + "/api/shortcut/context", capture_endpoint=base + "/api/shortcut/capture", runner_artifact_endpoint=base + "/api/shortcut/artifacts/action-runner", context_artifact_endpoint=base + "/api/shortcut/artifacts/phone-context", runner_source_endpoint=base + "/api/shortcut/runner-source", context_source_endpoint=base + "/api/shortcut/context-source", token=token)
+
+    @app.get("/api/shortcut/artifacts/<artifact>")
+    @require_auth
+    def shortcut_artifact(artifact: str):
+        artifacts = {
+            "action-runner": "pulse-action-runner.shortcut",
+            "phone-context": "pulse-phone-context.shortcut",
+        }
+        filename = artifacts.get(artifact)
+        if not filename:
+            return jsonify(error="unknown_shortcut_artifact"), 404
+        artifact_path = Path(__file__).resolve().parent.parent / "shortcuts" / "build" / filename
+        if not artifact_path.is_file():
+            return jsonify(error="shortcut_artifact_unavailable"), 503
+        return send_file(artifact_path, mimetype="application/octet-stream", as_attachment=True, download_name=filename, max_age=0)
 
     @app.get("/api/shortcut/runner-source")
     @require_auth
     def shortcut_runner_source():
         source_path = Path(__file__).resolve().parent.parent / "shortcuts" / "pulse-action-runner.cherri"
         return make_response(source_path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/plain; charset=utf-8", "Content-Disposition": "attachment; filename=pulse-action-runner.cherri"})
+
+    @app.get("/api/shortcut/context-source")
+    @require_auth
+    def shortcut_context_source():
+        source_path = Path(__file__).resolve().parent.parent / "shortcuts" / "pulse-phone-context.cherri"
+        return make_response(source_path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/plain; charset=utf-8", "Content-Disposition": "attachment; filename=pulse-phone-context.cherri"})
 
     @app.post("/api/location")
     @require_auth

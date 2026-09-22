@@ -345,12 +345,24 @@ def test_active_plan_followup_and_expiry(tmp_path):
 
 def test_shortcut_setup_and_authentication(tmp_path):
     client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
+    assert client.get("/api/shortcut/artifacts/action-runner").status_code in {401, 403}
     login(client)
     setup = client.get("/api/shortcut/setup")
     assert setup.status_code == 200 and setup.json["endpoint"].endswith("/api/shortcut/context")
     assert setup.json["runner_source_endpoint"].endswith("/api/shortcut/runner-source")
+    assert setup.json["runner_artifact_endpoint"].endswith("/api/shortcut/artifacts/action-runner")
+    assert setup.json["context_artifact_endpoint"].endswith("/api/shortcut/artifacts/phone-context")
     source = client.get("/api/shortcut/runner-source")
     assert source.status_code == 200 and "Pulse Action Runner" in source.text and "shortcut-test-token" not in source.text
+    for endpoint, source_name in ((setup.json["runner_artifact_endpoint"], "pulse-action-runner.cherri"), (setup.json["context_artifact_endpoint"], "pulse-phone-context.cherri")):
+        artifact = client.get(endpoint)
+        assert artifact.status_code == 200
+        assert artifact.headers["Content-Type"].startswith("application/octet-stream")
+        assert ".shortcut" in artifact.headers["Content-Disposition"]
+        assert artifact.data.startswith(b"AEA1")
+        assert len(artifact.data) > 1024
+        assert artifact.data != (Path(__file__).resolve().parent.parent / "shortcuts" / source_name).read_bytes()
+        assert b"shortcut-test-token" not in artifact.data
     assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": setup.json["token"]}).status_code == 200
     assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
 

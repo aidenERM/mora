@@ -6,3 +6,5 @@ data/*.sqlite3
 data/*.sqlite3-*
 data/*.db
 *.log
+pulse/shortcuts/*_processed.cherri
+pulse/shortcuts/*.plist
