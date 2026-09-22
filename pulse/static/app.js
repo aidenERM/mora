@@ -160,7 +160,7 @@ async function enableAlerts() {
 
 async function loadAuthenticatedState(options = {}) {
   const full = options.full ?? location.pathname.startsWith("/settings");
-  const [events, preferences, integrations] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/integrations")]);
+  const [events, preferences, integrations] = await Promise.all([api("/api/events?limit=100"), api("/api/preferences"), api("/api/integrations")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
   state.integrations = integrations.integrations || [];
