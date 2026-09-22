@@ -48,6 +48,19 @@ function formatDate(value) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
+function eventIsImportantNow(event) {
+  const timestamp = new Date(event.published_at || event.discovered_at || 0).getTime();
+  const ageMinutes = (Date.now() - timestamp) / 60000;
+  if (!Number.isFinite(timestamp) || ageMinutes < -60 || ageMinutes > 36 * 60) return false;
+  if (event.suppress_notification || event.relevant === false) return false;
+  if (event.notified_at) return true;
+  const trace = event.decision_trace || {};
+  const score = Number(trace.effective_score ?? event.score ?? 0);
+  const threshold = Number(trace.threshold ?? trace.base_threshold ?? 80);
+  const reason = String(event.notification_reason || "").toLowerCase();
+  return score >= threshold && !["source initialization", "not relevant", "stale event", "topic muted"].includes(reason);
+}
+
 function topicLabel(topic) {
   return state.config?.topics?.find((item) => item.id === topic)?.label || topic;
 }
@@ -145,18 +158,30 @@ async function enableAlerts() {
   }
 }
 
-async function loadAuthenticatedState() {
-  const [events, preferences, discovery, learning, audit, integrations, gameEvents] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/integrations"), api("/api/game-events")]);
+async function loadAuthenticatedState(options = {}) {
+  const full = options.full ?? location.pathname.startsWith("/settings");
+  const [events, preferences, integrations] = await Promise.all([api("/api/events?limit=50"), api("/api/preferences"), api("/api/integrations")]);
   state.events = events.events || [];
   state.preferences = preferences.preferences;
-  state.discovery = discovery;
-  state.learning = learning;
-  state.audit = audit;
   state.integrations = integrations.integrations || [];
   state.context = integrations.context || [];
   state.devices = integrations.devices || [];
-  state.gameEvents = gameEvents.events || [];
-  await checkSubscription();
+  if (full) {
+    const [discovery, learning, audit, gameEvents] = await Promise.all([api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/game-events")]);
+    state.discovery = discovery;
+    state.learning = learning;
+    state.audit = audit;
+    state.gameEvents = gameEvents.events || [];
+  }
+  const pathAtLoad = location.pathname;
+  void checkSubscription().then(() => {
+    if (!state.authenticated || location.pathname !== pathAtLoad) return;
+    if (pathAtLoad.startsWith("/integrations")) {
+      if (pathAtLoad.startsWith("/integrations/apple")) renderAppleSetup();
+      else renderIntegrations();
+    } else if (pathAtLoad.startsWith("/settings")) renderSettings();
+    else renderHome();
+  });
 }
 
 function loginView() {
@@ -257,7 +282,7 @@ function detailFeedback(event) {
 
 function integrationsCard() {
   const active = state.context?.filter((item) => item.active) || [];
-  const mode = active.find((item) => item.kind === "mode")?.value?.mode || "unknown";
+  const mode = active.find((item) => item.kind === "physical_context")?.value?.mode || active.find((item) => item.kind === "mode")?.value?.mode || "unknown";
   return `<section class="rules-card"><div class="rules-body"><div class="eyebrow">context and connections</div><h3>links</h3><p class="field-note">${state.integrations.filter((item) => item.connection_state === "connected").length} connected · ${escapeHtml(mode)}</p><a class="button secondary full" href="/integrations">manage connections</a></div></section>`;
 }
 
@@ -325,11 +350,11 @@ function renderHome() {
   document.title = "Pulse · quiet signals";
   // History is intentionally broader than the home feed. A high score alone
   // is not proof that Pulse pushed or that the event is still useful.
-  const importantEvents = state.events.filter((item) => Boolean(item.notified_at));
+  const importantEvents = state.events.filter(eventIsImportantNow);
   const baseEvents = state.showAllHistory ? state.events : importantEvents;
   const visibleEvents = state.activeTopic === "all" ? baseEvents : baseEvents.filter((item) => item.topic === state.activeTopic);
   const events = visibleEvents.length ? visibleEvents.map(eventCard).join("") : `<div class="empty-state"><span class="empty-mark">·</span><h2>nothing here yet</h2><p>Pulse keeps the feed quiet until something crosses your rules.</p></div>`;
-  const activeMode = state.context?.find((item) => item.kind === "mode")?.value?.mode || "quiet mode";
+  const activeMode = state.context?.find((item) => item.kind === "physical_context")?.value?.mode || state.context?.find((item) => item.kind === "mode")?.value?.mode || "quiet mode";
   const urgent = importantEvents.length;
   const historyAction = state.events.length > importantEvents.length ? `<button class="button ghost-button full" data-action="show-history">${state.showAllHistory ? "show important only" : `show all ${state.events.length} saved events`}</button>` : "";
   const topics = ["all", ...new Set(importantEvents.map((item) => item.topic))];
@@ -389,7 +414,7 @@ async function bootstrap() {
     const auth = await api("/api/auth/status");
     state.authenticated = auth.authenticated;
     connection.innerHTML = `<span class="status-dot ${state.authenticated ? "active" : "muted-dot"}"></span><span>${state.authenticated ? "watching" : "locked"}</span>`;
-    if (state.authenticated) await loadAuthenticatedState();
+    if (state.authenticated) await loadAuthenticatedState({ full: location.pathname.startsWith("/settings") });
     render();
   } catch (error) {
     connection.innerHTML = `<span class="status-dot muted-dot"></span><span>offline</span>`;
@@ -465,6 +490,7 @@ document.addEventListener("click", async (event) => {
   try {
     if (action === "open-settings") {
       history.pushState({}, "", "/settings");
+      await loadAuthenticatedState({ full: true });
       render();
       return;
     }

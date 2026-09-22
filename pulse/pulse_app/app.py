@@ -88,6 +88,22 @@ def _json_body() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _store_context_payload(conn, payload: dict, source: str) -> None:
+    # Keep physical location separate from sleep/focus state. Clear the
+    # previous transient values from this source so an old Focus=true or
+    # location cannot win simply because it remains in the table.
+    for kind in ("mode", "physical_context", "state", "sleep", "focus", "location"):
+        clear_context_signals(conn, kind=kind, source=source)
+    expires_at = payload["expires_at"]
+    set_context_signal(conn, "physical_context", {"mode": payload["physical_context"]}, source, payload["confidence"], expires_at)
+    # Keep the legacy mode record for existing consumers while new clients use
+    # physical_context and state explicitly.
+    set_context_signal(conn, "mode", {"mode": payload["mode"]}, source, payload["confidence"], expires_at)
+    set_context_signal(conn, "state", {"state": payload["state"]}, source, payload["confidence"], expires_at)
+    for kind, value in payload["signals"].items():
+        set_context_signal(conn, kind, value, source, payload["confidence"], expires_at)
+
+
 def _valid_time(value: str) -> bool:
     try:
         hour, minute = [int(part) for part in value.split(":", 1)]
@@ -472,9 +488,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             payload = normalize_companion_payload(_json_body())
         except (TypeError, ValueError) as exc:
             return jsonify(error=str(exc)), 400
-        set_context_signal(db(), "mode", {"mode": payload["mode"]}, "apple-companion", payload["confidence"], payload["expires_at"])
-        for kind, value in payload["signals"].items():
-            set_context_signal(db(), kind, value, "apple-companion", payload["confidence"], payload["expires_at"])
+        _store_context_payload(db(), payload, "apple-companion")
         previous = json.loads(device["metadata"] or "{}") if device["metadata"] else {}
         previous.update({"permissions": payload["permissions"], "last_payload_at": _now().isoformat(), "last_mode": payload["mode"]})
         update_companion_metadata(db(), device["id"], previous)
@@ -904,9 +918,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             payload = normalize_companion_payload(_json_body())
         except (TypeError, ValueError) as exc:
             return jsonify(error=str(exc)), 400
-        set_context_signal(db(), "mode", {"mode": payload["mode"]}, "shortcut", payload["confidence"], payload["expires_at"])
-        for kind, value in payload["signals"].items():
-            set_context_signal(db(), kind, value, "shortcut", payload["confidence"], payload["expires_at"])
+        _store_context_payload(db(), payload, "shortcut")
         db().commit()
         return jsonify(ok=True, context=active_context(db()))
 

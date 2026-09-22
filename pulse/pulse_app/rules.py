@@ -719,27 +719,33 @@ def _context_delivery_details(event: dict, now: datetime, config: dict, conn=Non
         return details
     rows = conn.execute("SELECT rowid,kind,value_json,source,confidence,observed_at FROM context_signals WHERE expires_at IS NULL OR expires_at>=? ORDER BY observed_at DESC,rowid DESC", (now.replace(microsecond=0).isoformat(),)).fetchall()
     mode = None
+    state = None
     focus = False
     for row in rows:
         try:
             value = json.loads(row["value_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             value = {}
+        if row["kind"] == "physical_context" and mode is None:
+            mode = value.get("mode")
         if row["kind"] == "mode" and mode is None:
             mode = value.get("mode")
+        if row["kind"] == "state" and state is None:
+            state = value.get("state")
         if row["kind"] in {"sleep", "focus"} and str(value.get("active", value.get("enabled", ""))).casefold() in {"1", "true", "yes", "on"}:
             focus = focus or row["kind"] == "focus"
-            if row["kind"] == "sleep" and mode is None:
-                mode = "sleep"
-    if mode != "sleep" and not focus:
+            if row["kind"] == "sleep" and state is None:
+                state = "sleep"
+    state = state or ("sleep" if mode == "sleep" else "focus" if focus else "awake")
+    if state not in {"sleep", "focus"}:
         return details
-    details.update({"active": True, "mode": mode, "focus": focus})
+    details.update({"active": True, "mode": mode, "state": state, "focus": focus})
     urgent = tier == "urgent" or (event.get("priority") == "critical" and score >= 90)
     time_sensitive = bool((event.get("metadata") or {}).get("time_sensitive") or (event.get("metadata") or {}).get("safety_critical"))
     bypassed = urgent or (tier == "high" and time_sensitive and score >= 95)
     details["bypassed"] = bypassed
     details["affected"] = not bypassed
-    details["reason"] = "critical safety delivery" if urgent else "time-sensitive delivery" if bypassed else "sleep context" if mode == "sleep" else "focus context"
+    details["reason"] = "critical safety delivery" if urgent else "time-sensitive delivery" if bypassed else "sleep context" if state == "sleep" else "focus context"
     return details
 
 
@@ -772,7 +778,10 @@ def evaluate_notification(event: dict, prefs: dict, now: datetime | None = None,
     if freshness["state"] == "unknown":
         effective_score = raw_score
     else:
-        freshness_factor = 0.5 + (float(freshness["score"]) / 200.0)
+        # Same-day stories should lose urgency gradually, not be cut nearly in
+        # half before the max-age boundary. The hard stale check below still
+        # prevents old stories from pushing.
+        freshness_factor = 0.75 + (float(freshness["score"]) / 400.0)
         effective_score = max(0, min(100, round(score_after_trend * freshness_factor)))
     components["trend_escalation"] = int(trend.get("bonus", 0))
     components["freshness_decay"] = score_after_trend - effective_score

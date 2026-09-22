@@ -16,7 +16,9 @@ const currentLocationValue = getCurrentLocation()
 const latitude = getLocationDetail(currentLocationValue, 'Latitude')
 const longitude = getLocationDetail(currentLocationValue, 'Longitude')
 const context = {
-  "mode": "outside",
+  "mode": "home",
+  "physical_context": "home",
+  "state": "awake",
   "confidence": 0.8,
   "signals": {
     "battery": {"level": getBatteryLevel(), "charging": isCharging()},

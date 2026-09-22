@@ -230,7 +230,11 @@ def test_bedrock_failure_is_safe_and_config_is_explicit(monkeypatch):
 
 def test_context_normalization_precedence_and_expiry(tmp_path):
     payload = normalize_companion_payload({"mode": "outside", "confidence": 0.9, "permissions": {"calendar": "granted"}, "signals": {"battery": {"level": "0.4"}}})
-    assert payload["mode"] == "outside" and payload["permissions"]["calendar"] == "granted"
+    assert payload["mode"] == "outside" and payload["physical_context"] == "outside" and payload["state"] == "awake" and payload["permissions"]["calendar"] == "granted"
+    home = normalize_companion_payload({"physical_context": "home", "state": "focus", "confidence": 1, "signals": {"location": {"latitude": 6.03131, "longitude": -75.43333, "accuracy": 20}}})
+    assert home["physical_context"] == "home" and home["state"] == "focus" and home["signals"]["location"]["latitude"] == 6.031
+    malformed = normalize_companion_payload({"mode": "outside", "confidence": 1, "signals": {"location": {"latitude": "Calle 13", "longitude": "La Ceja"}}})
+    assert "location" not in malformed["signals"]
     database = tmp_path / "pulse.sqlite3"
     init_db(database)
     conn = connect(database)
@@ -650,6 +654,7 @@ def test_freshness_decay_lowers_old_but_not_stale_events(tmp_path):
     assert not allowed
     assert "freshness decay" in reason
     assert trace["effective_score"] < trace["score"]
+    assert trace["effective_score"] >= 80
     assert trace["freshness"]["state"] == "fresh"
 
 
@@ -789,7 +794,7 @@ def test_false_negative_audit_records_distance_and_later_outcome(tmp_path):
     database = tmp_path / "pulse.sqlite3"
     init_db(database)
     conn = connect(database)
-    event, _ = upsert_event(conn, _decision_event("audit-1", score=83))
+    event, _ = upsert_event(conn, _decision_event("audit-1", score=77))
     config = load_config({"DATABASE_PATH": str(database), "NOTIFICATION_COOLDOWNS": {"warzone": 0}, "ROLLING_NOTIFICATION_LIMITS": {}})
     prefs = get_preferences(conn, config)
     allowed, reason, trace = evaluate_notification(event, prefs, datetime.now(timezone.utc), config, conn)

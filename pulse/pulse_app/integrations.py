@@ -68,16 +68,22 @@ def _safe_json(value, fallback=None):
         return fallback if fallback is not None else {}
 
 
-CONTEXT_MODES = {"home", "school", "outside", "travel", "sleep", "unknown"}
-CONTEXT_KINDS = {"mode", "calendar", "reminders", "health", "home", "music", "contacts", "weather", "location", "battery", "charging", "network", "sleep", "focus", "shortcut"}
+CONTEXT_MODES = {"home", "school", "outside", "travel", "unknown"}
+CONTEXT_STATES = {"awake", "sleep", "focus", "unknown"}
+CONTEXT_KINDS = {"mode", "physical_context", "state", "calendar", "reminders", "health", "home", "music", "contacts", "weather", "location", "battery", "charging", "network", "sleep", "focus", "shortcut"}
 CONTEXT_SOURCE_PRIORITY = {"apple-companion": 5, "trusted-inference": 4, "shortcut": 3, "browser-location": 2.5, "google-calendar": 2, "manual": 1}
 
 
 def normalize_companion_payload(body: dict) -> dict:
     body = body if isinstance(body, dict) else {}
-    mode = str(body.get("mode", "unknown")).strip().casefold()
-    if mode not in CONTEXT_MODES:
+    requested_mode = str(body.get("physical_context", body.get("mode", "unknown"))).strip().casefold()
+    state = str(body.get("state", "awake")).strip().casefold()
+    if requested_mode == "sleep":
+        requested_mode, state = "unknown", "sleep"
+    if requested_mode not in CONTEXT_MODES:
         raise ValueError("invalid context mode")
+    if state not in CONTEXT_STATES:
+        raise ValueError("invalid context state")
     try:
         confidence = max(0.0, min(1.0, float(body.get("confidence", 0.5))))
     except (TypeError, ValueError):
@@ -93,12 +99,27 @@ def normalize_companion_payload(body: dict) -> dict:
     for kind, value in raw_signals.items():
         if kind in CONTEXT_KINDS and isinstance(value, dict):
             # Only derived, bounded context crosses the companion boundary.
-            signals[kind] = {str(key)[:40]: str(item)[:160] for key, item in value.items() if key and item is not None}
-    if not expires_at and (mode != "unknown" or "location" in signals):
+            normalized = {str(key)[:40]: str(item)[:160] for key, item in value.items() if key and item is not None}
+            if kind == "location":
+                try:
+                    normalized = normalize_location_payload(normalized)["value"]
+                except ValueError:
+                    # A Shortcut can accidentally send a street address in
+                    # the latitude/longitude fields. Do not treat that as a
+                    # fresh location signal.
+                    continue
+            signals[kind] = normalized
+    focus_signal = signals.get("focus", {})
+    sleep_signal = signals.get("sleep", {})
+    if str(sleep_signal.get("active", sleep_signal.get("enabled", ""))).casefold() in {"1", "true", "yes", "on"}:
+        state = "sleep"
+    elif str(focus_signal.get("active", focus_signal.get("enabled", ""))).casefold() in {"1", "true", "yes", "on"}:
+        state = "focus"
+    if not expires_at and (requested_mode != "unknown" or "location" in signals):
         expires_at = _iso(_now() + timedelta(hours=2))
     permissions = body.get("permissions") if isinstance(body.get("permissions"), dict) else {}
     permissions = {str(key)[:40]: str(value)[:40] for key, value in permissions.items() if key and value is not None}
-    return {"mode": mode, "confidence": confidence, "expires_at": expires_at, "signals": signals, "permissions": permissions}
+    return {"mode": requested_mode, "physical_context": requested_mode, "state": state, "confidence": confidence, "expires_at": expires_at, "signals": signals, "permissions": permissions}
 
 
 def normalize_location_payload(body: dict, max_age_minutes: int = 180) -> dict:
@@ -146,7 +167,8 @@ def classify_apple_mail_message(message: dict) -> dict:
 def prepare_event_candidate(candidate: dict, contexts: list[dict] | None = None) -> dict:
     """Apply conservative context elevation to an already-normalized event."""
     contexts = contexts or []
-    mode = next((item.get("value", {}).get("mode") for item in contexts if item.get("kind") == "mode"), None)
+    mode = next((item.get("value", {}).get("mode") for item in contexts if item.get("kind") == "physical_context"), None)
+    mode = mode or next((item.get("value", {}).get("mode") for item in contexts if item.get("kind") == "mode"), None)
     context_kinds = {item.get("kind") for item in contexts}
     boost = 0
     reason = ""
