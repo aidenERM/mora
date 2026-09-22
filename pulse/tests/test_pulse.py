@@ -14,11 +14,12 @@ from pulse_app.app import create_app
 from pulse_app import discovery, sources
 from pulse_app.config import load_config
 from pulse_app.rules import apply_preference_adjustments, domain_adjustment, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
-from pulse_app.worker import _integration_failure_candidate, _integration_failure_transition
+from pulse_app.worker import _active_plan_candidates, _integration_failure_candidate, _integration_failure_transition
 from pulse_app.sources import parse_feed
 from pulse_app.actions import extract_plan_candidate, validate_iphone_action
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
-from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, list_plan_candidates, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
+from pulse_app.storage import connect, create_morning_catchup, create_watch, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, list_plan_candidates, list_watches, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, update_plan_candidate, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
+from pulse_app.sources import collect_watch_candidates
 
 
 def make_client(tmp_path: Path, overrides: dict | None = None):
@@ -228,7 +229,7 @@ def test_plan_approval_uses_confirmed_calendar_action(tmp_path, monkeypatch):
     monkeypatch.setattr("pulse_app.app.create_google_calendar_event", lambda *_args: {"provider": "google-calendar", "event_id": "calendar-1", "html_link": "https://calendar.google.test/event-1"})
     result = client.post(f"/api/plans/{plan['id']}/approve", json={})
     assert result.status_code == 200
-    assert result.json["plan"]["status"] == "executed"
+    assert result.json["plan"]["status"] == "active"
     assert result.json["action"]["status"] == "completed"
 
 
@@ -301,6 +302,47 @@ def test_iphone_payload_validation_is_strict():
         validate_iphone_action("create_calendar_event", {"title": "test", "start": "2026-09-22T12:00:00+00:00", "end": "2026-09-22T11:00:00+00:00"})
 
 
+def test_watch_api_and_meaningful_diff_pipeline(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    login(client)
+    created = client.post("/api/watches", json={"label": "Release page", "url": "https://example.test/release", "topic": "apple", "keywords": ["release"], "frequency_minutes": 30})
+    assert created.status_code == 201
+    watch_id = created.json["watch"]["id"]
+    database = tmp_path / "pulse.sqlite3"
+    conn = connect(database)
+    monkeypatch.setattr(sources, "_request", lambda *_args, **_kwargs: b"<html><title>Release</title><main>first content</main></html>")
+    assert collect_watch_candidates(conn, load_config({"DATABASE_PATH": str(database)})) == []
+    conn.commit()
+    assert list_watches(conn)[0]["last_digest"]
+    assert collect_watch_candidates(conn, load_config({"DATABASE_PATH": str(database)})) == []
+    monkeypatch.setattr(sources, "_request", lambda *_args, **_kwargs: b"<html><title>Release</title><main>important new release content</main></html>")
+    conn.execute("UPDATE watches SET last_checked_at=? WHERE id=?", ("2000-01-01T00:00:00+00:00", watch_id))
+    candidates = collect_watch_candidates(conn, load_config({"DATABASE_PATH": str(database)}))
+    assert len(candidates) == 1 and candidates[0]["metadata"]["watch_id"] == watch_id
+    conn.commit()
+    assert client.patch(f"/api/watches/{watch_id}", json={"enabled": False}).status_code == 200
+    assert client.delete(f"/api/watches/{watch_id}").status_code == 200
+
+
+def test_active_plan_followup_and_expiry(tmp_path):
+    database = tmp_path / "pulse.sqlite3"
+    init_db(database)
+    conn = connect(database)
+    config = load_config({"DATABASE_PATH": str(database)})
+    from pulse_app.actions import save_extracted_plan
+    plan = extract_plan_candidate({"id": "followup-1", "subject": "Gaming Friday at 8 PM", "snippet": "let's play Warzone"}, "gmail", config, "event-followup")
+    save_extracted_plan(conn, plan)
+    update_plan_candidate(conn, plan["id"], "active")
+    conn.execute("UPDATE plan_candidates SET updated_at=? WHERE id=?", ("2020-01-01T00:00:00+00:00", plan["id"]))
+    event, _ = upsert_event(conn, {"id": "weather-followup", "source_id": "weather", "source_kind": "weather", "topic": "weather", "title": "Heavy rain soon", "summary": "Rain may affect the plan.", "body": "weather", "url": "https://weather.test", "canonical_key": "weather-followup", "published_at": datetime.now(timezone.utc).isoformat(), "discovered_at": datetime.now(timezone.utc).isoformat(), "last_seen_at": datetime.now(timezone.utc).isoformat(), "score": 94, "priority": "high", "relevant": True, "metadata": {}})
+    conn.commit()
+    candidates = _active_plan_candidates(conn, datetime.now(timezone.utc))
+    assert candidates and candidates[0]["metadata"]["plan_id"] == plan["id"]
+    conn.execute("UPDATE plan_candidates SET end_at=?,status='active' WHERE id=?", ("2020-01-01T01:00:00+00:00", plan["id"]))
+    assert _active_plan_candidates(conn, datetime.now(timezone.utc)) == []
+    assert conn.execute("SELECT status FROM plan_candidates WHERE id=?", (plan["id"],)).fetchone()[0] == "completed"
+
+
 def test_shortcut_setup_and_authentication(tmp_path):
     client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
     login(client)
@@ -324,6 +366,18 @@ def test_shortcut_capture_preserves_shared_context_and_extracts_plan(tmp_path):
     assert result.json["capture"]["source"] == "instagram"
     assert result.json["plan"]["action_type"] == "calendar_event"
     assert client.post("/api/shortcut/capture", json={"text": "private"}, headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
+
+
+def test_people_facts_are_explicit_and_attached_to_shared_capture(tmp_path):
+    client = make_client(tmp_path)
+    login(client)
+    conn = connect(tmp_path / "pulse.sqlite3")
+    person = upsert_person(conn, "manual", "daniel", "Daniel", emails=["daniel@example.test"])
+    conn.commit()
+    result = client.post("/api/capture", json={"source": "whatsapp", "text": "useful context", "person_id": person["id"], "fact": "prefers gaming plans on Fridays"})
+    assert result.status_code == 201 and result.json["fact"]["person_id"] == person["id"]
+    facts = client.get(f"/api/people/{person['id']}/facts")
+    assert facts.status_code == 200 and facts.json["facts"][0]["fact"].startswith("prefers gaming")
 
 
 def test_bedrock_structured_validation(monkeypatch):

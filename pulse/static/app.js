@@ -3,6 +3,7 @@ const state = {
   authenticated: false,
   events: [],
   plans: [],
+  watches: [],
   preferences: null,
   discovery: null,
   learning: null,
@@ -169,11 +170,12 @@ async function loadAuthenticatedState(options = {}) {
   state.devices = integrations.devices || [];
   state.plans = plans.plans || [];
   if (full) {
-    const [discovery, learning, audit, gameEvents] = await Promise.all([api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/game-events")]);
+    const [discovery, learning, audit, gameEvents, watches] = await Promise.all([api("/api/discovery"), api("/api/learning"), api("/api/audit?near_threshold=1&suppressed_only=1&limit=30"), api("/api/game-events"), api("/api/watches")]);
     state.discovery = discovery;
     state.learning = learning;
     state.audit = audit;
     state.gameEvents = gameEvents.events || [];
+    state.watches = watches.watches || [];
   }
   const pathAtLoad = location.pathname;
   void checkSubscription().then(() => {
@@ -213,11 +215,11 @@ function eventCard(event) {
 }
 
 function plansCard() {
-  const plans = (state.plans || []).filter((item) => item.status === "proposed" || item.status === "approved" || ["queued", "claimed", "failed"].includes(item.action?.status));
+  const plans = (state.plans || []).filter((item) => item.status === "proposed" || item.status === "approved" || item.status === "active" || ["queued", "claimed", "failed"].includes(item.action?.status));
   if (!plans.length) return "";
   const rows = plans.slice(0, 3).map((plan) => {
     const actionStatus = plan.action?.status;
-    const stateText = actionStatus === "queued" ? "waiting for iPhone" : actionStatus === "claimed" ? "running on iPhone" : actionStatus === "completed" ? "completed" : actionStatus === "failed" ? "failed · try again from the source" : "detected";
+    const stateText = plan.status === "active" ? "active" : actionStatus === "queued" ? "waiting for iPhone" : actionStatus === "claimed" ? "running on iPhone" : actionStatus === "completed" ? "completed" : actionStatus === "failed" ? "failed · try again from the source" : "detected";
     const controls = plan.status === "proposed" ? `<button class="button secondary" data-action="approve-plan" data-plan-id="${escapeHtml(plan.id)}" data-target="apple_calendar">add to calendar</button><button class="button ghost-button" data-action="approve-plan" data-plan-id="${escapeHtml(plan.id)}" data-target="apple_reminder">add reminder</button><button class="button ghost-button" data-action="reject-plan" data-plan-id="${escapeHtml(plan.id)}">dismiss</button>` : `<span class="provider-status ${actionStatus === "failed" ? "attention" : "setup"}">${stateText}</span>`;
     return `<div class="source-row"><span><strong>${escapeHtml(plan.title)}</strong><small>${escapeHtml(formatDate(plan.start_at))}${plan.location ? ` · ${escapeHtml(plan.location)}` : ""} · ${Math.round(Number(plan.confidence || 0) * 100)}% confidence · ${stateText}</small></span><span class="provider-actions">${controls}</span></div>`;
   }).join("");
@@ -245,6 +247,13 @@ function discoveryCard() {
   const entities = escapeHtml(JSON.stringify(discovery.entities || [], null, 2));
   const status = discovery.enabled ? `${discovery.provider === "google_news_rss" ? "public RSS discovery" : "broad search"} every ${discovery.interval_minutes} minutes` : "direct watchers only";
   return `<details class="rules-card discovery-card"><summary><span><span class="eyebrow">discovery</span><strong>search profiles and tracked things</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">${escapeHtml(status)}. these settings are stored in Pulse and never include the search key.</p><label for="profiles-json">search profiles <textarea id="profiles-json" rows="12" spellcheck="false">${profiles}</textarea></label><label for="entities-json">tracked entities <textarea id="entities-json" rows="12" spellcheck="false">${entities}</textarea></label><button class="button secondary full" data-action="save-discovery">save discovery settings</button><p class="fine-print">advanced editor: profiles need id, label, topic, queries, keywords, active. entities need id, name, aliases, topic, boost.</p></div></details>`;
+}
+
+function watchesCard() {
+  const watches = state.watches || [];
+  const rows = watches.map((watch) => `<div class="source-row"><span><strong>${escapeHtml(watch.label)}</strong><small>${escapeHtml(watch.topic)} · every ${watch.frequency_minutes}m · ${watch.last_error ? `error: ${escapeHtml(watch.last_error)}` : watch.last_meaningful_change_at ? `changed ${escapeHtml(formatDate(watch.last_meaningful_change_at))}` : "waiting for first meaningful change"}</small></span><span class="provider-actions"><button class="button ghost-button" data-action="toggle-watch" data-watch-id="${escapeHtml(watch.id)}" data-enabled="${watch.enabled}">${watch.enabled ? "pause" : "resume"}</button><button class="button ghost-button" data-action="delete-watch" data-watch-id="${escapeHtml(watch.id)}">remove</button></span></div>`).join("") || `<p class="fine-print">no Watches yet</p>`;
+  const topics = ["watcher", "apple", "ios", "openai", "warzone", "rocket_league", "unstable_smp", "github", "package", "purchase", "security", "service_status", "colombia", "instagram"];
+  return `<details class="rules-card"><summary><span><span class="eyebrow">watches</span><strong>pages Pulse monitors</strong></span><span class="chevron">⌄</span></summary><div class="rules-body"><p class="field-note">Pulse ignores layout-only changes and sends only meaningful content changes through the normal relevance rules.</p><form id="watch-form" class="password-form"><label>name<input id="watch-label" placeholder="Apple release page" required></label><label>URL<input id="watch-url" type="url" placeholder="https://example.com/page" required></label><div class="time-row"><label>topic<select id="watch-topic">${topics.map((topic) => `<option value="${topic}">${escapeHtml(topicLabel(topic))}</option>`).join("")}</select></label><label>check every minutes<input id="watch-frequency" type="number" min="15" max="1440" value="60" required></label></div><label>keywords<input id="watch-keywords" placeholder="release, patch, outage"></label><button class="button secondary full" type="submit">add Watch</button></form><div class="source-list">${rows}</div></div></details>`;
 }
 
 function learningCard() {
@@ -379,7 +388,7 @@ function renderHome() {
 
 function renderSettings() {
   document.title = "Pulse · controls";
-  app.innerHTML = `<section class="page-heading"><span class="eyebrow">controls</span><h1>your Pulse</h1><p>quiet hours, interests, sources, feedback, and security.</p></section>${integrationsCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">changes apply to the next 15-minute check.</p>`;
+  app.innerHTML = `<section class="page-heading"><span class="eyebrow">controls</span><h1>your Pulse</h1><p>quiet hours, interests, sources, feedback, and security.</p></section>${integrationsCard()}${watchesCard()}${rulesCard()}${discoveryCard()}${learningCard()}${auditCard()}${passwordCard()}<p class="footer-note">changes apply to the next 15-minute check.</p>`;
 }
 
 async function renderDetail(eventId) {
@@ -481,6 +490,15 @@ document.addEventListener("submit", async (event) => {
     } catch (error) { showToast(error.message, true); }
     return;
   }
+  if (event.target.id === "watch-form") {
+    try {
+      const keywords = document.querySelector("#watch-keywords").value.split(",").map((item) => item.trim()).filter(Boolean);
+      await api("/api/watches", { method: "POST", body: JSON.stringify({ label: document.querySelector("#watch-label").value, url: document.querySelector("#watch-url").value, topic: document.querySelector("#watch-topic").value, frequency_minutes: Number(document.querySelector("#watch-frequency").value), keywords }) });
+      showToast("Watch added");
+      await loadAuthenticatedState({ full: true }); renderSettings();
+    } catch (error) { showToast(error.message, true); }
+    return;
+  }
   if (event.target.id !== "login-form") return;
   const password = new FormData(event.target).get("password");
   try {
@@ -530,6 +548,8 @@ document.addEventListener("click", async (event) => {
       showToast("draft ready for review");
     }
     if (action === "delete-game-event") { await api(`/api/game-events/${encodeURIComponent(event.target.closest("[data-game-event-id]")?.dataset.gameEventId)}`, { method: "DELETE", body: "{}" }); await loadAuthenticatedState(); render(); showToast("countdown removed"); }
+    if (action === "toggle-watch") { const button = event.target.closest("[data-watch-id]"); await api(`/api/watches/${encodeURIComponent(button.dataset.watchId)}`, { method: "PATCH", body: JSON.stringify({ enabled: button.dataset.enabled !== "true" }) }); await loadAuthenticatedState({ full: true }); renderSettings(); showToast(button.dataset.enabled === "true" ? "Watch paused" : "Watch resumed"); }
+    if (action === "delete-watch") { const button = event.target.closest("[data-watch-id]"); await api(`/api/watches/${encodeURIComponent(button.dataset.watchId)}`, { method: "DELETE", body: "{}" }); await loadAuthenticatedState({ full: true }); renderSettings(); showToast("Watch removed"); }
     if (action === "mute") { await api(`/api/topics/${encodeURIComponent(event.target.closest("[data-topic]")?.dataset.topic || state.detail.topic)}/mute`, { method: "POST", body: JSON.stringify({ days: 7 }) }); showToast("topic muted for seven days"); }
     if (action === "follow" || action === "less-like") {
       const eventId = event.target.closest("[data-event-id]")?.dataset.eventId || state.detail.id;

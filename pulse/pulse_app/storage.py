@@ -172,6 +172,16 @@ CREATE TABLE IF NOT EXISTS people (
     UNIQUE(provider, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_people_importance ON people(importance, updated_at DESC);
+CREATE TABLE IF NOT EXISTS person_facts (
+    id TEXT PRIMARY KEY,
+    person_id TEXT NOT NULL,
+    fact TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE(person_id, fact)
+);
+CREATE INDEX IF NOT EXISTS idx_person_facts_person ON person_facts(person_id, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_recent ON events(discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic, discovered_at DESC);
 CREATE TABLE IF NOT EXISTS canonical_events (
@@ -311,6 +321,23 @@ CREATE TABLE IF NOT EXISTS pulse_captures (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pulse_captures_recent ON pulse_captures(created_at DESC);
+CREATE TABLE IF NOT EXISTS watches (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    label TEXT NOT NULL,
+    topic TEXT NOT NULL DEFAULT 'watcher',
+    keywords TEXT NOT NULL DEFAULT '[]',
+    frequency_minutes INTEGER NOT NULL DEFAULT 60,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_checked_at TEXT,
+    last_meaningful_change_at TEXT,
+    last_digest TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watches_due ON watches(enabled, last_checked_at, frequency_minutes);
 """
 
 
@@ -344,7 +371,7 @@ def list_plan_candidates(conn: sqlite3.Connection, status: str | None = None, li
     if status:
         rows = conn.execute("SELECT * FROM plan_candidates WHERE status=? ORDER BY start_at LIMIT ?", (status, limit)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM plan_candidates ORDER BY start_at LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute("SELECT * FROM plan_candidates WHERE status IN ('proposed','approved','active') ORDER BY start_at LIMIT ?", (limit,)).fetchall()
     items = []
     for row in rows:
         item = get_plan_candidate(conn, row["id"])
@@ -354,10 +381,15 @@ def list_plan_candidates(conn: sqlite3.Connection, status: str | None = None, li
 
 
 def update_plan_candidate(conn: sqlite3.Connection, plan_id: str, status: str) -> dict | None:
-    if status not in {"proposed", "approved", "rejected", "executed", "expired"}:
+    if status not in {"proposed", "approved", "active", "rejected", "completed", "executed", "expired", "cancelled"}:
         raise ValueError("invalid plan status")
     conn.execute("UPDATE plan_candidates SET status=?,updated_at=? WHERE id=?", (status, utc_now(), plan_id))
     return get_plan_candidate(conn, plan_id)
+
+
+def list_active_plans(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    rows = conn.execute("SELECT * FROM plan_candidates WHERE status='active' ORDER BY start_at LIMIT ?", (max(1, min(200, int(limit))),)).fetchall()
+    return [get_plan_candidate(conn, row["id"]) for row in rows]
 
 
 def _action_from_row(row) -> dict | None:
@@ -468,6 +500,74 @@ def create_capture(conn: sqlite3.Connection, capture: dict) -> dict:
     item = dict(row)
     item["metadata"] = _safe_json(item.get("metadata"), {})
     return item
+
+
+def _watch_from_row(row) -> dict | None:
+    if not row:
+        return None
+    item = dict(row)
+    item["keywords"] = _safe_json(item.get("keywords"), [])
+    item["enabled"] = bool(item.get("enabled"))
+    return item
+
+
+def create_watch(conn: sqlite3.Connection, watch: dict) -> dict:
+    now = utc_now()
+    watch_id = str(watch.get("id") or "watch-" + secrets.token_urlsafe(12))
+    conn.execute("INSERT INTO watches(id,url,label,topic,keywords,frequency_minutes,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (watch_id, str(watch["url"])[:1000], str(watch.get("label") or watch["url"])[:160], str(watch.get("topic") or "watcher")[:60], json.dumps(watch.get("keywords") or [], separators=(",", ":")), max(15, min(1440, int(watch.get("frequency_minutes", 60)))), int(bool(watch.get("enabled", True))), now, now))
+    return _watch_from_row(conn.execute("SELECT * FROM watches WHERE id=?", (watch_id,)).fetchone())
+
+
+def list_watches(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    return [_watch_from_row(row) for row in conn.execute("SELECT * FROM watches ORDER BY enabled DESC, updated_at DESC LIMIT ?", (max(1, min(200, int(limit))),)).fetchall()]
+
+
+def get_watch(conn: sqlite3.Connection, watch_id: str) -> dict | None:
+    return _watch_from_row(conn.execute("SELECT * FROM watches WHERE id=?", (watch_id,)).fetchone())
+
+
+def update_watch(conn: sqlite3.Connection, watch_id: str, fields: dict) -> dict | None:
+    current = get_watch(conn, watch_id)
+    if not current:
+        return None
+    allowed = {"url", "label", "topic", "keywords", "frequency_minutes", "enabled"}
+    values = {key: fields[key] for key in allowed if key in fields}
+    if not values:
+        return current
+    if "url" in values:
+        values["url"] = str(values["url"])[:1000]
+    if "label" in values:
+        values["label"] = str(values["label"])[:160]
+    if "topic" in values:
+        values["topic"] = str(values["topic"])[:60]
+    if "keywords" in values:
+        values["keywords"] = json.dumps(values["keywords"] if isinstance(values["keywords"], list) else [], separators=(",", ":"))
+    if "frequency_minutes" in values:
+        values["frequency_minutes"] = max(15, min(1440, int(values["frequency_minutes"])))
+    if "enabled" in values:
+        values["enabled"] = int(bool(values["enabled"]))
+    assignments = ",".join(key + "=?" for key in values)
+    conn.execute(f"UPDATE watches SET {assignments},updated_at=? WHERE id=?", (*values.values(), utc_now(), watch_id))
+    return get_watch(conn, watch_id)
+
+
+def delete_watch(conn: sqlite3.Connection, watch_id: str) -> bool:
+    return bool(conn.execute("DELETE FROM watches WHERE id=?", (watch_id,)).rowcount)
+
+
+def due_watches(conn: sqlite3.Connection, now: str | None = None) -> list[dict]:
+    now = now or utc_now()
+    rows = conn.execute("SELECT * FROM watches WHERE enabled=1 AND (last_checked_at IS NULL OR datetime(last_checked_at, '+' || frequency_minutes || ' minutes') <= datetime(?)) ORDER BY COALESCE(last_checked_at,'') LIMIT 50", (now,)).fetchall()
+    return [_watch_from_row(row) for row in rows]
+
+
+def record_watch_check(conn: sqlite3.Connection, watch_id: str, *, digest: str | None = None, changed: bool = False, error: str = "") -> dict | None:
+    now = utc_now()
+    if error:
+        conn.execute("UPDATE watches SET last_checked_at=?,last_error=?,failure_count=failure_count+1,updated_at=? WHERE id=?", (now, error[:160], now, watch_id))
+    else:
+        conn.execute("UPDATE watches SET last_checked_at=?,last_meaningful_change_at=CASE WHEN ? THEN ? ELSE last_meaningful_change_at END,last_digest=?,last_error='',failure_count=0,updated_at=? WHERE id=?", (now, int(changed), now, digest or "", now, watch_id))
+    return get_watch(conn, watch_id)
 
 
 def _safe_json(value, fallback=None):
@@ -822,6 +922,20 @@ def set_person_importance(conn: sqlite3.Connection, person_id: str, importance: 
     item = dict(row)
     item["emails"] = _safe_json(item.get("emails"), []) or []
     return item
+
+
+def upsert_person_fact(conn: sqlite3.Connection, person_id: str, fact: str, source: str = "manual") -> dict:
+    fact = str(fact or "").strip()[:500]
+    if not fact:
+        raise ValueError("fact is required")
+    now = utc_now()
+    fact_id = "fact-" + hashlib.sha256((person_id + ":" + fact.casefold()).encode()).hexdigest()[:24]
+    conn.execute("INSERT INTO person_facts(id,person_id,fact,source,created_at,last_seen_at) VALUES(?,?,?,?,?,?) ON CONFLICT(person_id,fact) DO UPDATE SET source=excluded.source,last_seen_at=excluded.last_seen_at", (fact_id, person_id, fact, str(source or "manual")[:80], now, now))
+    return dict(conn.execute("SELECT * FROM person_facts WHERE id=?", (fact_id,)).fetchone())
+
+
+def list_person_facts(conn: sqlite3.Connection, person_id: str, limit: int = 50) -> list[dict]:
+    return [dict(row) for row in conn.execute("SELECT * FROM person_facts WHERE person_id=? ORDER BY last_seen_at DESC LIMIT ?", (person_id, max(1, min(100, int(limit))))).fetchall()]
 
 
 def important_person_for(conn: sqlite3.Connection, sender: str) -> dict | None:

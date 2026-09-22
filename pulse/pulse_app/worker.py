@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import time
 from datetime import datetime, timezone
 
@@ -9,8 +10,8 @@ from .discovery import collect_discovery_candidates
 from .integrations import PROVIDERS, mark_failure, sync_provider
 from .push import send_payload
 from .rules import apply_preference_adjustments, evaluate_notification, notification_copy
-from .sources import collect_candidates
-from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, get_source_state, init_db, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, prune_history, record_event_action, record_notification_decision, runtime_config, save_source_state, upsert_event
+from .sources import collect_candidates, collect_watch_candidates
+from .storage import connect, create_morning_catchup, due_reminders, game_event_candidates, get_preferences, get_source_state, init_db, list_active_plans, mark_notification_suppressed, mark_notified, mark_reminded, pending_events, prune_history, record_event_action, record_notification_decision, runtime_config, save_source_state, update_plan_candidate, upsert_event
 
 LOGGER = logging.getLogger("pulse.worker")
 
@@ -90,6 +91,44 @@ def _send_event(conn, config: dict, event: dict, reminder: bool = False) -> dict
     return result
 
 
+def _active_plan_candidates(conn, now: datetime) -> list[dict]:
+    candidates = []
+    for plan in list_active_plans(conn):
+        try:
+            end_at = datetime.fromisoformat(str(plan["end_at"]).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            end_at = now
+        if end_at <= now:
+            update_plan_candidate(conn, plan["id"], "completed")
+            continue
+        rows = conn.execute("SELECT * FROM events WHERE discovered_at>? AND relevant=1 AND topic IN ('weather','package','purchase','travel','service_status','security') ORDER BY discovered_at DESC LIMIT 30", (plan["updated_at"],)).fetchall()
+        for row in rows:
+            event = dict(row)
+            identity = event.get("canonical_event_id") or event.get("cluster_id") or event["id"]
+            try:
+                event_metadata = json.loads(event.get("metadata") or "{}") if isinstance(event.get("metadata"), str) else (event.get("metadata") or {})
+            except json.JSONDecodeError:
+                event_metadata = {}
+            candidates.append({
+                "id": "plan-followup-" + identity[:32],
+                "source_id": "plan:" + plan["id"],
+                "source_kind": "plan_followup",
+                "topic": event["topic"],
+                "title": f"{plan['title']}: {event['title']}",
+                "summary": f"This may affect your active plan. {event.get('summary') or event.get('body') or ''}"[:700],
+                "body": "A tracked plan changed because a related signal appeared.",
+                "url": event.get("url") or "https://pulse.moralife.uk/",
+                "canonical_key": f"plan-followup:{plan['id']}:{identity}",
+                "published_at": event.get("published_at") or event.get("discovered_at"),
+                "score": min(99, max(78, int(event.get("score") or 0))),
+                "priority": event.get("priority") or "high",
+                "relevant": True,
+                "suppress_notification": False,
+                "metadata": {"plan_followup": True, "plan_id": plan["id"], "related_event_id": event["id"], "sources": event_metadata.get("sources", [])},
+            })
+    return candidates
+
+
 def run_once(config: dict | None = None) -> dict:
     config = config or load_config()
     init_db(config["DATABASE_PATH"])
@@ -98,6 +137,8 @@ def run_once(config: dict | None = None) -> dict:
     notifications = 0
     errors = []
     try:
+        save_source_state(conn, "worker:heartbeat", {"started_at": datetime.now(timezone.utc).isoformat(), "last_completed_at": get_source_state(conn, "worker:heartbeat").get("last_completed_at") or "", "ok": False})
+        conn.commit()
         runtime = runtime_config(conn, config)
         integration_candidates = []
         for provider in ("google", "discord", "apple-calendar", "apple-contacts", "apple-mail"):
@@ -114,8 +155,14 @@ def run_once(config: dict | None = None) -> dict:
                         integration_candidates.append(failure)
                     errors.append(provider + ":" + error_code)
                     conn.commit()
+        followup_candidates = _active_plan_candidates(conn, datetime.now(timezone.utc))
         direct_candidates = collect_candidates(conn, runtime)
-        candidates = [*integration_candidates, *direct_candidates, *game_event_candidates(conn)]
+        try:
+            watch_candidates = collect_watch_candidates(conn, runtime)
+        except Exception as exc:
+            LOGGER.exception("watch check failed: %s", exc)
+            watch_candidates = []
+        candidates = [*integration_candidates, *followup_candidates, *direct_candidates, *watch_candidates, *game_event_candidates(conn)]
         try:
             candidates.extend(collect_discovery_candidates(conn, runtime, direct_candidates))
         except Exception as exc:
@@ -167,6 +214,8 @@ def run_once(config: dict | None = None) -> dict:
                 errors.append(str(exc))
                 LOGGER.exception("reminder failed for %s", event["id"])
         prune_history(conn, runtime, now)
+        save_source_state(conn, "worker:heartbeat", {"started_at": get_source_state(conn, "worker:heartbeat").get("started_at", now.isoformat()), "last_completed_at": datetime.now(timezone.utc).isoformat(), "ok": not errors, "errors": errors[:10]})
+        conn.commit()
         return {"inserted": inserted, "notifications": notifications, "errors": errors}
     finally:
         conn.close()

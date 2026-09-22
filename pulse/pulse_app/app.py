@@ -49,6 +49,8 @@ from .storage import (
     clear_reminder,
     clear_context_signals,
     list_people,
+    list_person_facts,
+    upsert_person_fact,
     set_person_importance,
     list_packages,
     list_purchases,
@@ -67,6 +69,10 @@ from .storage import (
     complete_action,
     fail_action,
     create_capture,
+    create_watch,
+    list_watches,
+    update_watch,
+    delete_watch,
     upsert_game_event,
     upsert_event,
 )
@@ -190,7 +196,14 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.get("/api/health")
     def health():
-        return jsonify(ok=True, service="pulse", version="0.2.0", push_configured=push_configured(config), now=_now().isoformat())
+        heartbeat = get_source_state(db(), "worker:heartbeat")
+        completed = heartbeat.get("last_completed_at", "")
+        try:
+            heartbeat_age_minutes = round(max(0, (_now() - datetime.fromisoformat(completed)).total_seconds() / 60), 1) if completed else None
+        except ValueError:
+            heartbeat_age_minutes = None
+        worker_ok = heartbeat_age_minutes is not None and heartbeat_age_minutes <= max(30, config["POLL_MINUTES"] * 3)
+        return jsonify(ok=True, service="pulse", version="0.2.0", push_configured=push_configured(config), now=_now().isoformat(), worker={"ok": worker_ok, "last_completed_at": completed or None, "age_minutes": heartbeat_age_minutes})
 
     @app.get("/api/config")
     def public_config():
@@ -592,17 +605,74 @@ def create_app(test_config: dict | None = None) -> Flask:
         url = str(body.get("url") or "").strip()[:1000]
         if not title and not text and not url:
             return jsonify(error="capture_content_required"), 400
+        person_id = str(body.get("person_id") or "").strip()[:120]
+        fact = str(body.get("fact") or "").strip()[:500]
+        fact_item = None
+        if person_id and fact:
+            if not db().execute("SELECT 1 FROM people WHERE id=?", (person_id,)).fetchone():
+                return jsonify(error="person_not_found"), 404
+            fact_item = upsert_person_fact(db(), person_id, fact, source)
         plan = extract_plan_candidate({"id": body.get("id", ""), "subject": title, "snippet": text, "url": url}, source, config)
         if plan:
             plan = save_extracted_plan(db(), plan)
-        capture = create_capture(db(), {"source": source, "title": title, "body": text, "url": url, "metadata": {"shared": True}, "plan_id": plan["id"] if plan else ""})
+        capture = create_capture(db(), {"source": source, "title": title, "body": text, "url": url, "metadata": {"shared": True, "person_id": person_id, "fact_id": fact_item["id"] if fact_item else ""}, "plan_id": plan["id"] if plan else ""})
         db().commit()
-        return jsonify(ok=True, capture=capture, plan=plan), 201
+        return jsonify(ok=True, capture=capture, plan=plan, fact=fact_item), 201
 
     @app.post("/api/capture")
     @require_auth
     def capture():
         return receive_capture(str(_json_body().get("source") or "share_sheet"))
+
+    @app.get("/api/watches")
+    @require_auth
+    def watches():
+        return jsonify(watches=list_watches(db()))
+
+    @app.post("/api/watches")
+    @require_auth
+    def watch_create():
+        body = _json_body()
+        url = str(body.get("url") or "").strip()
+        topic = str(body.get("topic") or "watcher").strip()
+        keywords = body.get("keywords") if isinstance(body.get("keywords"), list) else []
+        if not (url.startswith("https://") or url.startswith("http://")):
+            return jsonify(error="http_url_required"), 400
+        if topic not in TOPIC_LABELS:
+            return jsonify(error="invalid_topic"), 400
+        if len(keywords) > 20:
+            return jsonify(error="too_many_keywords"), 400
+        try:
+            item = create_watch(db(), {"url": url, "label": body.get("label") or url, "topic": topic, "keywords": [str(item)[:80] for item in keywords if str(item).strip()], "frequency_minutes": body.get("frequency_minutes", 60), "enabled": body.get("enabled", True)})
+        except (TypeError, ValueError):
+            return jsonify(error="invalid_watch"), 400
+        db().commit()
+        return jsonify(watch=item), 201
+
+    @app.patch("/api/watches/<watch_id>")
+    @require_auth
+    def watch_update(watch_id: str):
+        body = _json_body()
+        if "url" in body and not str(body["url"]).startswith(("https://", "http://")):
+            return jsonify(error="http_url_required"), 400
+        if "topic" in body and str(body["topic"]) not in TOPIC_LABELS:
+            return jsonify(error="invalid_topic"), 400
+        try:
+            item = update_watch(db(), watch_id, body)
+        except (TypeError, ValueError):
+            return jsonify(error="invalid_watch"), 400
+        if not item:
+            return jsonify(error="not_found"), 404
+        db().commit()
+        return jsonify(watch=item)
+
+    @app.delete("/api/watches/<watch_id>")
+    @require_auth
+    def watch_delete(watch_id: str):
+        if not delete_watch(db(), watch_id):
+            return jsonify(error="not_found"), 404
+        db().commit()
+        return jsonify(ok=True)
 
     @app.post("/api/plans/<plan_id>/approve")
     @require_auth
@@ -651,7 +721,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 raise ValueError("unsupported_action")
             result = create_google_calendar_event(db(), config, plan)
             action = update_action_proposal(db(), action["id"], "completed", result)
-            update_plan_candidate(db(), plan_id, "executed")
+            update_plan_candidate(db(), plan_id, "active")
             db().commit()
             return jsonify(ok=True, plan=get_plan_candidate(db(), plan_id), action=action)
         except Exception as exc:
@@ -860,6 +930,25 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify(error="not_found"), 404
         db().commit()
         return jsonify(person=item)
+
+    @app.get("/api/people/<person_id>/facts")
+    @require_auth
+    def people_facts(person_id: str):
+        if not db().execute("SELECT 1 FROM people WHERE id=?", (person_id,)).fetchone():
+            return jsonify(error="not_found"), 404
+        return jsonify(facts=list_person_facts(db(), person_id))
+
+    @app.post("/api/people/<person_id>/facts")
+    @require_auth
+    def people_fact_create(person_id: str):
+        if not db().execute("SELECT 1 FROM people WHERE id=?", (person_id,)).fetchone():
+            return jsonify(error="not_found"), 404
+        try:
+            fact = upsert_person_fact(db(), person_id, _json_body().get("fact", ""), str(_json_body().get("source") or "manual"))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        db().commit()
+        return jsonify(fact=fact), 201
 
     @app.post("/api/events/<event_id>/remind")
     @require_auth
@@ -1096,8 +1185,11 @@ def create_app(test_config: dict | None = None) -> Flask:
         if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":"))) > 4000:
             return jsonify(error="invalid_action_result"), 400
         action = complete_action(db(), action_id, result)
+        plan = get_plan_candidate(db(), current["plan_id"])
+        if plan and plan["status"] == "approved":
+            update_plan_candidate(db(), plan["id"], "active")
         db().commit()
-        return jsonify(action=action)
+        return jsonify(action=action, plan=get_plan_candidate(db(), current["plan_id"]))
 
     @app.post("/api/shortcut/actions/<action_id>/fail")
     def shortcut_action_fail(action_id: str):

@@ -16,7 +16,7 @@ from xml.etree import ElementTree
 
 from .config import TOPIC_LABELS
 from .rules import annotate_candidate, canonical_url, clean_text, normalize, score_item
-from .storage import get_source_state, save_source_state
+from .storage import due_watches, get_source_state, record_watch_check, save_source_state
 
 LOGGER = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0"
@@ -660,4 +660,28 @@ def collect_candidates(conn, config: dict) -> list[dict]:
                 candidates.extend(_github_candidates(conn, source, config))
         except Exception as exc:
             LOGGER.warning("source %s failed: %s", source.get("id"), exc)
+    return [annotate_candidate(candidate, config.get("TRACKED_ENTITIES", [])) for candidate in candidates]
+
+
+def collect_watch_candidates(conn, config: dict) -> list[dict]:
+    candidates = []
+    for watch in due_watches(conn):
+        try:
+            snapshot = _html_snapshot(_request(watch["url"], {"Accept": "text/html,application/xhtml+xml,application/rss+xml,application/atom+xml"}))
+            digest = snapshot["digest"]
+            if not watch.get("last_digest"):
+                record_watch_check(conn, watch["id"], digest=digest)
+                continue
+            if digest == watch.get("last_digest"):
+                record_watch_check(conn, watch["id"], digest=digest)
+                continue
+            source = {"id": "watch:" + watch["id"], "kind": "watch", "label": watch["label"], "url": watch["url"], "topic": watch["topic"], "trust": "reliable_secondary", "keywords": watch.get("keywords") or []}
+            candidate = _source_item(source, {"title": snapshot["title"], "summary": snapshot["summary"], "url": watch["url"], "guid": digest})
+            candidate["body"] = f"{watch['label']} changed in a meaningful way."
+            candidate["metadata"].update({"watch_id": watch["id"], "watch_label": watch["label"], "watch_change": True})
+            record_watch_check(conn, watch["id"], digest=digest, changed=True)
+            candidates.append(candidate)
+        except Exception as exc:
+            LOGGER.warning("watch %s failed: %s", watch.get("id"), type(exc).__name__)
+            record_watch_check(conn, watch["id"], error=type(exc).__name__)
     return [annotate_candidate(candidate, config.get("TRACKED_ENTITIES", [])) for candidate in candidates]
