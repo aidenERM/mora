@@ -26,3 +26,10 @@ automations; iOS does not guarantee reliable background PWA GPS execution.
 The included `pulse-phone-context.cherri` is a thin template. Replace its token
 placeholder only in the local Shortcut, compile/import it with Cherri, and test
 one manual run before adding automations.
+
+`pulse-action-runner.cherri` is the companion action template. It polls the
+approved action queue, claims one action, runs only the allowlisted native
+Calendar/Reminders/URL/context branch, and reports completion with the action
+claim token. The current Windows checkout does not verify Cherri compilation or
+iPhone import, so Pulse labels this as a source template until it is tested on
+an Apple device.

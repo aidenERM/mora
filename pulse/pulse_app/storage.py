@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -281,9 +282,24 @@ CREATE TABLE IF NOT EXISTS action_proposals (
     error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    executed_at TEXT
+    executed_at TEXT,
+    approved_at TEXT,
+    claimed_at TEXT,
+    expires_at TEXT,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT 'google',
+    claim_token TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_action_proposals_status ON action_proposals(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS action_proposal_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id TEXT NOT NULL,
+    from_status TEXT NOT NULL DEFAULT '',
+    to_status TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_audit_action ON action_proposal_audit(action_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS pulse_captures (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -329,7 +345,12 @@ def list_plan_candidates(conn: sqlite3.Connection, status: str | None = None, li
         rows = conn.execute("SELECT * FROM plan_candidates WHERE status=? ORDER BY start_at LIMIT ?", (status, limit)).fetchall()
     else:
         rows = conn.execute("SELECT * FROM plan_candidates ORDER BY start_at LIMIT ?", (limit,)).fetchall()
-    return [get_plan_candidate(conn, row["id"]) for row in rows]
+    items = []
+    for row in rows:
+        item = get_plan_candidate(conn, row["id"])
+        item["action"] = latest_action_for_plan(conn, row["id"])
+        items.append(item)
+    return items
 
 
 def update_plan_candidate(conn: sqlite3.Connection, plan_id: str, status: str) -> dict | None:
@@ -339,20 +360,101 @@ def update_plan_candidate(conn: sqlite3.Connection, plan_id: str, status: str) -
     return get_plan_candidate(conn, plan_id)
 
 
-def create_action_proposal(conn: sqlite3.Connection, plan: dict, risk: str = "confirm") -> dict:
+def _action_from_row(row) -> dict | None:
+    if not row:
+        return None
+    item = dict(row)
+    for key in ("payload", "result"):
+        item[key] = _safe_json(item.get(key), {})
+    return item
+
+
+def _audit_action(conn: sqlite3.Connection, action_id: str, from_status: str, to_status: str, detail: dict | None = None) -> None:
+    conn.execute("INSERT INTO action_proposal_audit(action_id,from_status,to_status,detail,created_at) VALUES(?,?,?,?,?)", (action_id, from_status, to_status, json.dumps(detail or {}, separators=(",", ":")), utc_now()))
+
+
+def create_action_proposal(conn: sqlite3.Connection, plan: dict, risk: str = "confirm", *, action_type: str | None = None, payload: dict | None = None, status: str = "pending", target: str = "google", idempotency_key: str = "", expires_at: str | None = None) -> dict:
     now = utc_now()
+    if idempotency_key:
+        existing = conn.execute("SELECT * FROM action_proposals WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+        if existing:
+            return _action_from_row(existing)
     action_id = "action-" + secrets.token_urlsafe(18)
-    conn.execute("INSERT INTO action_proposals(id,plan_id,action_type,status,risk,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (action_id, plan["id"], plan.get("action_type", "calendar_event"), "pending", risk, json.dumps(plan.get("action_payload", {}), separators=(",", ":")), now, now))
+    expires_at = expires_at or (datetime.fromisoformat(now) + timedelta(hours=24)).isoformat()
+    action_type = action_type or plan.get("action_type", "calendar_event")
+    payload = payload if payload is not None else plan.get("action_payload", {})
+    approved_at = now if status in {"approved", "queued", "claimed", "completed"} else None
+    conn.execute("INSERT INTO action_proposals(id,plan_id,action_type,status,risk,payload,created_at,updated_at,approved_at,expires_at,idempotency_key,target) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (action_id, plan["id"], action_type, status, risk, json.dumps(payload, separators=(",", ":")), now, now, approved_at, expires_at, idempotency_key, target))
+    _audit_action(conn, action_id, "", status, {"target": target})
     row = conn.execute("SELECT * FROM action_proposals WHERE id=?", (action_id,)).fetchone()
-    return dict(row)
+    return _action_from_row(row)
+
+
+def get_action_proposal(conn: sqlite3.Connection, action_id: str) -> dict | None:
+    return _action_from_row(conn.execute("SELECT * FROM action_proposals WHERE id=?", (action_id,)).fetchone())
+
+
+def latest_action_for_plan(conn: sqlite3.Connection, plan_id: str) -> dict | None:
+    return _action_from_row(conn.execute("SELECT * FROM action_proposals WHERE plan_id=? ORDER BY created_at DESC LIMIT 1", (plan_id,)).fetchone())
 
 
 def update_action_proposal(conn: sqlite3.Connection, action_id: str, status: str, result: dict | None = None, error: str = "") -> dict | None:
     now = utc_now()
-    executed_at = now if status in {"completed", "failed"} else None
-    conn.execute("UPDATE action_proposals SET status=?,result=?,error=?,updated_at=?,executed_at=? WHERE id=?", (status, json.dumps(result or {}, separators=(",", ":")), error[:240], now, executed_at, action_id))
-    row = conn.execute("SELECT * FROM action_proposals WHERE id=?", (action_id,)).fetchone()
-    return dict(row) if row else None
+    current = get_action_proposal(conn, action_id)
+    if not current:
+        return None
+    if current["status"] == status and status in {"completed", "failed"}:
+        return current
+    executed_at = now if status in {"completed", "failed"} else current.get("executed_at")
+    approved_at = current.get("approved_at") or (now if status in {"approved", "queued", "claimed", "completed"} else None)
+    claimed_at = current.get("claimed_at") or (now if status in {"claimed", "completed"} else None)
+    conn.execute("UPDATE action_proposals SET status=?,result=?,error=?,updated_at=?,executed_at=?,approved_at=?,claimed_at=? WHERE id=?", (status, json.dumps(result or {}, separators=(",", ":")), error[:240], now, executed_at, approved_at, claimed_at, action_id))
+    _audit_action(conn, action_id, current["status"], status, {"error": error[:240]} if error else (result or {}))
+    return get_action_proposal(conn, action_id)
+
+
+def queue_action(conn: sqlite3.Connection, action_id: str) -> dict | None:
+    action = get_action_proposal(conn, action_id)
+    if not action or action["status"] not in {"approved", "queued"}:
+        return action if action and action["status"] == "queued" else None
+    if action["status"] == "queued":
+        return action
+    return update_action_proposal(conn, action_id, "queued")
+
+
+def next_queued_action(conn: sqlite3.Connection) -> dict | None:
+    now = utc_now()
+    for row in conn.execute("SELECT id FROM action_proposals WHERE status IN ('queued','claimed') AND expires_at IS NOT NULL AND expires_at<?", (now,)).fetchall():
+        update_action_proposal(conn, row["id"], "failed", error="expired")
+    row = conn.execute("SELECT * FROM action_proposals WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+    return _action_from_row(row)
+
+
+def claim_action(conn: sqlite3.Connection, action_id: str, claim_token: str = "") -> dict | None:
+    action = get_action_proposal(conn, action_id)
+    if not action:
+        return None
+    if action["status"] == "completed":
+        return action
+    if action["status"] == "claimed":
+        return action if claim_token and hmac.compare_digest(action.get("claim_token", ""), claim_token) else None
+    if action["status"] != "queued":
+        return None
+    now = utc_now()
+    claim_token = claim_token or secrets.token_urlsafe(24)
+    changed = conn.execute("UPDATE action_proposals SET status='claimed',claimed_at=?,updated_at=?,claim_token=? WHERE id=? AND status='queued'", (now, now, claim_token, action_id)).rowcount
+    if not changed:
+        return get_action_proposal(conn, action_id)
+    _audit_action(conn, action_id, "queued", "claimed")
+    return get_action_proposal(conn, action_id)
+
+
+def complete_action(conn: sqlite3.Connection, action_id: str, result: dict) -> dict | None:
+    return update_action_proposal(conn, action_id, "completed", result=result)
+
+
+def fail_action(conn: sqlite3.Connection, action_id: str, error: str) -> dict | None:
+    return update_action_proposal(conn, action_id, "failed", error=error)
 
 
 def create_capture(conn: sqlite3.Connection, capture: dict) -> dict:
@@ -780,6 +882,19 @@ def init_db(path: str | Path, initial_password_hash: str = "") -> None:
         companion_columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_devices)").fetchall()}
         if "metadata" not in companion_columns:
             conn.execute("ALTER TABLE companion_devices ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        action_columns = {row[1] for row in conn.execute("PRAGMA table_info(action_proposals)").fetchall()}
+        action_migrations = {
+            "approved_at": "TEXT",
+            "claimed_at": "TEXT",
+            "expires_at": "TEXT",
+            "idempotency_key": "TEXT NOT NULL DEFAULT ''",
+            "target": "TEXT NOT NULL DEFAULT 'google'",
+            "claim_token": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in action_migrations.items():
+            if name not in action_columns:
+                conn.execute(f"ALTER TABLE action_proposals ADD COLUMN {name} {definition}")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_action_proposals_idempotency ON action_proposals(idempotency_key) WHERE idempotency_key != ''")
         for row in conn.execute("SELECT * FROM events WHERE canonical_event_id='' OR content_hash='' OR (notified_at IS NOT NULL AND notification_count=0)").fetchall():
             item = event_from_row(row)
             fingerprint = event_fingerprint(item)

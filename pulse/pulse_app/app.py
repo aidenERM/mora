@@ -59,13 +59,20 @@ from .storage import (
     update_plan_candidate,
     create_action_proposal,
     update_action_proposal,
+    get_action_proposal,
+    latest_action_for_plan,
+    queue_action,
+    next_queued_action,
+    claim_action,
+    complete_action,
+    fail_action,
     create_capture,
     upsert_game_event,
     upsert_event,
 )
 from .worker import _payload
 from .bedrock import classify_or_fallback, validate_config
-from .actions import extract_plan_candidate, save_extracted_plan
+from .actions import extract_plan_candidate, save_extracted_plan, validate_iphone_action
 from .integrations import (
     PROVIDERS,
     active_context,
@@ -444,14 +451,20 @@ def create_app(test_config: dict | None = None) -> Flask:
         token = shortcut_token()
         if not token:
             return jsonify(error="shortcut_not_configured"), 503
-        return jsonify(endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", token=token)
+        return jsonify(endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", runner_source_endpoint=config["APP_URL"] + "/api/shortcut/runner-source", token=token)
 
     @app.post("/api/shortcut/token/rotate")
     @require_auth
     def shortcut_rotate():
         token = secrets.token_urlsafe(32)
         save_credential(db(), "shortcut", {"token": token})
-        return jsonify(ok=True, endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", token=token)
+        return jsonify(ok=True, endpoint=config["APP_URL"] + "/api/shortcut/context", capture_endpoint=config["APP_URL"] + "/api/shortcut/capture", runner_source_endpoint=config["APP_URL"] + "/api/shortcut/runner-source", token=token)
+
+    @app.get("/api/shortcut/runner-source")
+    @require_auth
+    def shortcut_runner_source():
+        source_path = Path(__file__).resolve().parent.parent / "shortcuts" / "pulse-action-runner.cherri"
+        return make_response(source_path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/plain; charset=utf-8", "Content-Disposition": "attachment; filename=pulse-action-runner.cherri"})
 
     @app.post("/api/location")
     @require_auth
@@ -599,6 +612,39 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify(error="not_found"), 404
         if plan["status"] not in {"proposed", "approved"}:
             return jsonify(error="plan_not_actionable"), 409
+        body = _json_body()
+        target = str(body.get("target") or "google").strip()
+        if target in {"apple_calendar", "apple_reminder"}:
+            action_type = "create_calendar_event" if target == "apple_calendar" else "create_reminder"
+            source_payload = plan.get("action_payload") or {}
+            payload = {
+                "title": source_payload.get("summary") or plan.get("title"),
+                "start": plan.get("start_at"),
+                "end": plan.get("end_at"),
+                "location": source_payload.get("location") or plan.get("location"),
+                "notes": source_payload.get("description") or plan.get("summary"),
+                "due": plan.get("start_at"),
+                "list": body.get("list", ""),
+                "priority": body.get("priority", 0),
+            }
+            if action_type == "create_reminder":
+                payload = {key: payload[key] for key in ("title", "due", "list", "notes", "priority")}
+            else:
+                payload = {key: payload[key] for key in ("title", "start", "end", "location", "notes", "calendar_name") if key in payload}
+            try:
+                normalized = validate_iphone_action(action_type, payload)
+            except (TypeError, ValueError) as exc:
+                return jsonify(error=str(exc)), 400
+            normalized["pulse_action_id"] = "pending"
+            action = create_action_proposal(db(), plan, risk="confirm", action_type=action_type, payload=normalized, status="approved", target=target, idempotency_key=f"plan:{plan_id}:{target}")
+            normalized["pulse_action_id"] = action["id"]
+            db().execute("UPDATE action_proposals SET payload=? WHERE id=?", (json.dumps(normalized, separators=(",", ":")), action["id"]))
+            action = queue_action(db(), action["id"])
+            update_plan_candidate(db(), plan_id, "approved")
+            db().commit()
+            return jsonify(ok=True, queued=True, plan=get_plan_candidate(db(), plan_id), action=action), 202
+        if target != "google":
+            return jsonify(error="unsupported_action_target"), 400
         action = create_action_proposal(db(), plan, risk="confirm")
         try:
             if plan["action_type"] != "calendar_event":
@@ -622,6 +668,30 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify(error="not_found"), 404
         db().commit()
         return jsonify(ok=True, plan=plan)
+
+    @app.post("/api/shortcut/test-action")
+    @require_auth
+    def shortcut_test_action():
+        action_type = str(_json_body().get("action_type") or "").strip()
+        start = (_now() + timedelta(hours=1)).isoformat()
+        end = (_now() + timedelta(hours=2)).isoformat()
+        if action_type == "create_calendar_event":
+            payload = {"title": "Pulse test event", "start": start, "end": end, "location": "", "notes": "Safe test created by Pulse.", "calendar_name": ""}
+        elif action_type == "create_reminder":
+            payload = {"title": "Pulse test reminder", "due": start, "list": "", "notes": "Safe test created by Pulse.", "priority": 0}
+        else:
+            return jsonify(error="unsupported_action_type"), 400
+        try:
+            payload = validate_iphone_action(action_type, payload)
+        except (TypeError, ValueError) as exc:
+            return jsonify(error=str(exc)), 400
+        plan = {"id": "test-plan-" + secrets.token_urlsafe(10), "action_type": action_type, "action_payload": payload}
+        action = create_action_proposal(db(), plan, risk="confirm", action_type=action_type, payload=payload, status="approved", target="apple", idempotency_key="test:" + secrets.token_urlsafe(18))
+        payload["pulse_action_id"] = action["id"]
+        db().execute("UPDATE action_proposals SET payload=? WHERE id=?", (json.dumps(payload, separators=(",", ":")), action["id"]))
+        action = queue_action(db(), action["id"])
+        db().commit()
+        return jsonify(ok=True, action=action), 202
 
     @app.get("/api/packages")
     @require_auth
@@ -986,6 +1056,66 @@ def create_app(test_config: dict | None = None) -> Flask:
         _store_context_payload(db(), payload, "shortcut")
         db().commit()
         return jsonify(ok=True, context=active_context(db()))
+
+    def shortcut_action_auth() -> bool:
+        token = shortcut_token()
+        return bool(token and hmac.compare_digest(request.headers.get("X-Pulse-Shortcut-Token", ""), token))
+
+    @app.get("/api/shortcut/actions/next")
+    def shortcut_action_next():
+        if not shortcut_action_auth():
+            return jsonify(error="shortcut_not_configured"), 403
+        action = next_queued_action(db())
+        db().commit()
+        return jsonify(action=action)
+
+    @app.post("/api/shortcut/actions/<action_id>/claim")
+    def shortcut_action_claim(action_id: str):
+        if not shortcut_action_auth():
+            return jsonify(error="shortcut_not_configured"), 403
+        action = claim_action(db(), action_id, request.headers.get("X-Pulse-Action-Claim", ""))
+        db().commit()
+        if not action:
+            return jsonify(error="action_not_claimable"), 409
+        return jsonify(action=action)
+
+    @app.post("/api/shortcut/actions/<action_id>/complete")
+    def shortcut_action_complete(action_id: str):
+        if not shortcut_action_auth():
+            return jsonify(error="shortcut_not_configured"), 403
+        current = get_action_proposal(db(), action_id)
+        if not current:
+            return jsonify(error="not_found"), 404
+        if current["status"] == "completed":
+            return jsonify(action=current)
+        if current["status"] != "claimed":
+            return jsonify(error="action_not_claimed"), 409
+        if not hmac.compare_digest(current.get("claim_token", ""), request.headers.get("X-Pulse-Action-Claim", "")):
+            return jsonify(error="action_claim_mismatch"), 409
+        result = _json_body().get("result", {})
+        if not isinstance(result, dict) or len(json.dumps(result, separators=(",", ":"))) > 4000:
+            return jsonify(error="invalid_action_result"), 400
+        action = complete_action(db(), action_id, result)
+        db().commit()
+        return jsonify(action=action)
+
+    @app.post("/api/shortcut/actions/<action_id>/fail")
+    def shortcut_action_fail(action_id: str):
+        if not shortcut_action_auth():
+            return jsonify(error="shortcut_not_configured"), 403
+        current = get_action_proposal(db(), action_id)
+        if not current:
+            return jsonify(error="not_found"), 404
+        if current["status"] == "failed":
+            return jsonify(action=current)
+        if current["status"] not in {"queued", "claimed"}:
+            return jsonify(error="action_not_failible"), 409
+        if current["status"] == "claimed" and not hmac.compare_digest(current.get("claim_token", ""), request.headers.get("X-Pulse-Action-Claim", "")):
+            return jsonify(error="action_claim_mismatch"), 409
+        error = str(_json_body().get("error") or "shortcut_action_failed").strip()[:240]
+        action = fail_action(db(), action_id, error)
+        db().commit()
+        return jsonify(action=action)
 
     @app.post("/api/shortcut/capture")
     def shortcut_capture():

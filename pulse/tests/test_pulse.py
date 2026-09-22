@@ -16,7 +16,7 @@ from pulse_app.config import load_config
 from pulse_app.rules import apply_preference_adjustments, domain_adjustment, evaluate_notification, is_quiet_hours, notification_copy, should_notify, score_item
 from pulse_app.worker import _integration_failure_candidate, _integration_failure_transition
 from pulse_app.sources import parse_feed
-from pulse_app.actions import extract_plan_candidate
+from pulse_app.actions import extract_plan_candidate, validate_iphone_action
 from pulse_app.integrations import classify_apple_mail_message, classify_gmail_message, consume_oauth_state, create_oauth_state, google_authorization_url, normalize_companion_payload, normalize_icloud_calendar_event, normalize_icloud_contact, normalize_location_payload, prepare_event_candidate
 from pulse_app.storage import connect, create_morning_catchup, game_event_candidates, get_event, get_preferences, init_db, list_notification_decisions, list_plan_candidates, mark_notified, pending_events, prune_history, record_notification_decision, set_context_signal, upsert_event, upsert_package, upsert_package_record, upsert_purchase, upsert_purchase_record, upsert_person, list_people, set_person_importance, upsert_game_event
 
@@ -232,11 +232,83 @@ def test_plan_approval_uses_confirmed_calendar_action(tmp_path, monkeypatch):
     assert result.json["action"]["status"] == "completed"
 
 
+def test_apple_plan_approval_queues_only_after_explicit_target(tmp_path):
+    client = make_client(tmp_path)
+    login(client)
+    database = tmp_path / "pulse.sqlite3"
+    conn = connect(database)
+    plan = extract_plan_candidate({"id": "m5", "subject": "Meet Friday at 8 PM", "snippet": "let's meet"}, "gmail", load_config({"DATABASE_PATH": str(database)}), "event-5")
+    from pulse_app.actions import save_extracted_plan
+    save_extracted_plan(conn, plan)
+    conn.commit()
+    result = client.post(f"/api/plans/{plan['id']}/approve", json={"target": "apple_calendar"})
+    assert result.status_code == 202
+    assert result.json["action"]["action_type"] == "create_calendar_event"
+    assert result.json["action"]["status"] == "queued"
+    assert result.json["plan"]["status"] == "approved"
+    retry = client.post(f"/api/plans/{plan['id']}/approve", json={"target": "apple_calendar"})
+    assert retry.status_code == 202 and retry.json["action"]["id"] == result.json["action"]["id"]
+
+
+def test_shortcut_action_queue_claim_completion_and_duplicate_retry(tmp_path):
+    client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
+    login(client)
+    created = client.post("/api/shortcut/test-action", json={"action_type": "create_calendar_event"})
+    assert created.status_code == 202
+    action_id = created.json["action"]["id"]
+    headers = {"X-Pulse-Shortcut-Token": "shortcut-test-token"}
+    assert client.get("/api/shortcut/actions/next", headers=headers).json["action"]["id"] == action_id
+    claimed = client.post(f"/api/shortcut/actions/{action_id}/claim", headers=headers, json={})
+    assert claimed.status_code == 200 and claimed.json["action"]["status"] == "claimed"
+    claim_headers = {**headers, "X-Pulse-Action-Claim": claimed.json["action"]["claim_token"]}
+    assert client.post(f"/api/shortcut/actions/{action_id}/claim", headers=headers, json={}).status_code == 409
+    assert client.post(f"/api/shortcut/actions/{action_id}/claim", headers=claim_headers, json={}).json["action"]["status"] == "claimed"
+    completed = client.post(f"/api/shortcut/actions/{action_id}/complete", headers=claim_headers, json={"result": {"event_identifier": "event-1"}})
+    assert completed.status_code == 200 and completed.json["action"]["status"] == "completed"
+    assert client.post(f"/api/shortcut/actions/{action_id}/complete", headers=headers, json={"result": {"event_identifier": "event-1"}}).json["action"]["status"] == "completed"
+    assert client.get("/api/shortcut/actions/next", headers=headers).json["action"] is None
+    assert client.get("/api/shortcut/actions/next", headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
+
+
+def test_shortcut_action_failure_expiry_and_unknown_type(tmp_path):
+    client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
+    login(client)
+    assert client.post("/api/shortcut/test-action", json={"action_type": "shell"}).status_code == 400
+    action = client.post("/api/shortcut/test-action", json={"action_type": "create_reminder"}).json["action"]
+    headers = {"X-Pulse-Shortcut-Token": "shortcut-test-token"}
+    failed = client.post(f"/api/shortcut/actions/{action['id']}/fail", headers=headers, json={"error": "device_offline"})
+    assert failed.status_code == 200 and failed.json["action"]["status"] == "failed"
+    action = client.post("/api/shortcut/test-action", json={"action_type": "create_reminder"}).json["action"]
+    claimed = client.post(f"/api/shortcut/actions/{action['id']}/claim", headers=headers, json={})
+    claim_headers = {**headers, "X-Pulse-Action-Claim": claimed.json["action"]["claim_token"]}
+    failed = client.post(f"/api/shortcut/actions/{action['id']}/fail", headers=claim_headers, json={"error": "device_offline"})
+    assert failed.status_code == 200 and failed.json["action"]["status"] == "failed"
+    action = client.post("/api/shortcut/test-action", json={"action_type": "create_reminder"}).json["action"]
+    database = tmp_path / "pulse.sqlite3"
+    conn = connect(database)
+    conn.execute("UPDATE action_proposals SET expires_at=? WHERE id=?", ("2000-01-01T00:00:00+00:00", action["id"]))
+    conn.commit()
+    assert client.get("/api/shortcut/actions/next", headers=headers).json["action"] is None
+    assert conn.execute("SELECT status FROM action_proposals WHERE id=?", (action["id"],)).fetchone()[0] == "failed"
+
+
+def test_iphone_payload_validation_is_strict():
+    valid = validate_iphone_action("create_reminder", {"title": "test", "due": "2026-09-22T12:00:00+00:00", "priority": 0})
+    assert valid["title"] == "test"
+    with pytest.raises(ValueError, match="https_url_required"):
+        validate_iphone_action("open_url", {"url": "file:///etc/passwd"})
+    with pytest.raises(ValueError, match="calendar_end_must_follow_start"):
+        validate_iphone_action("create_calendar_event", {"title": "test", "start": "2026-09-22T12:00:00+00:00", "end": "2026-09-22T11:00:00+00:00"})
+
+
 def test_shortcut_setup_and_authentication(tmp_path):
     client = make_client(tmp_path, {"SHORTCUT_TOKEN": "shortcut-test-token"})
     login(client)
     setup = client.get("/api/shortcut/setup")
     assert setup.status_code == 200 and setup.json["endpoint"].endswith("/api/shortcut/context")
+    assert setup.json["runner_source_endpoint"].endswith("/api/shortcut/runner-source")
+    source = client.get("/api/shortcut/runner-source")
+    assert source.status_code == 200 and "Pulse Action Runner" in source.text and "shortcut-test-token" not in source.text
     assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": setup.json["token"]}).status_code == 200
     assert client.post("/api/shortcut/context", json={"mode": "home"}, headers={"X-Pulse-Shortcut-Token": "bad"}).status_code == 403
 
