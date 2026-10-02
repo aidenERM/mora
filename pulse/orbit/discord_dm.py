@@ -49,9 +49,9 @@ class Approval(discord.ui.View):
                     return
                 try:
                     bot.store.approve(step, accepted)
-                    await interaction.response.edit_message(content="Approved. I’ll continue." if accepted else "Declined. Task cancelled.", view=None)
+                    await interaction.response.edit_message(content="alr, continuing" if accepted else "cancelled", view=None)
                 except ValueError:
-                    await interaction.response.send_message("That approval expired or was already resolved.")
+                    await interaction.response.send_message("that approval expired or was already handled")
             button.callback = callback
             self.add_item(button)
 
@@ -77,7 +77,7 @@ class OrbitDiscord(discord.Client):
 
     async def on_ready(self):
         self.store.state("discord", {"connected": True, "ready_at": time.time()})
-        self.memory.notice("setup", "connected", "Orbit is connected. Send me a goal here. I’m using the existing AWS connection; OpenAI is not configured yet.")
+        self.memory.notice("setup", "connected", "i'm here. send me what u need")
 
     async def on_disconnect(self):
         self.store.state("discord", {"connected": False, "updated_at": time.time()})
@@ -129,7 +129,7 @@ class OrbitDiscord(discord.Client):
                 if separator and prefix.lower().strip() in CATEGORIES:
                     category, value = prefix.lower().strip(), body.strip()
                 memory_id = self.memory.remember(value, category, source="discord:" + str(message.id), context="explicit user request")
-                await message.channel.send("Remembered. Reference: " + memory_id[:8])
+                await message.channel.send("got it, i'll remember that")
             except ValueError:
                 await message.channel.send("That text could not be saved as memory.")
         elif kind == "forget":
@@ -160,7 +160,7 @@ class OrbitDiscord(discord.Client):
                 schedule_id = self.store.state("last_schedule")
                 if schedule_id:
                     self.scheduler.disable(schedule_id)
-            await message.channel.send("Stopped." if rows or schedule_id else "Nothing is running.")
+            await message.channel.send("stopped" if rows or schedule_id else "nothing's running rn")
         elif kind == "model":
             model, goal = value
             self.store.state("default_model", model)
@@ -193,14 +193,14 @@ class OrbitDiscord(discord.Client):
                 return
             schedule = self.scheduler.create(timing["goal"], timing["interval"], timing["wake_at"], model or self.store.state("default_model") or "auto", {"user_id": str(self.owner_id)})
             self.store.state("last_schedule", schedule)
-            await message.channel.send("Scheduled. Reference: " + schedule[:8])
+            await message.channel.send("alr, scheduled")
             return
         task = self.store.create(goal, model or self.store.state("default_model") or "auto", source="discord", source_key="discord:" + str(message.id),
             metadata={"user_id": str(self.owner_id), "attachments": attachments,
                       "conversation": self.memory.recent(), "previous_task": previous},
             wake_at=timing["wake_at"] if timing else None)
         self.store.state("last_user_task", task["id"])
-        await message.channel.send(("Scheduled. " if timing else "on it. ") + task["id"][:8])
+        await message.channel.send("alr, scheduled" if timing else "on it")
 
     @tasks.loop(seconds=5)
     async def deliver(self):
