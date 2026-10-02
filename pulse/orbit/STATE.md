@@ -90,7 +90,8 @@ Separate SQLite under `/var/lib/pulse/orbit`; backup before additive schema work
 Raw DMs: 40 messages/14 days. Completed tool observations: 90 days. Task identity
 and useful results remain; explicit memory persists until forgotten; episodes
 expire after 90 days. Roles use configured IDs, not guessed names. `codex` is a
-code-model role, not an authenticated native Codex CLI. AWS currently powers Orbit.
+code-model role. Official Codex CLI now supplies decisions through the existing
+Orbit pipeline; AWS remains the fallback and the dedicated vision provider.
 
 ## External blockers / unverified
 
@@ -102,18 +103,27 @@ reported an expired calendar session in one plain-language sentence. This was
 a synthetic-input provider test, not proof of a real calendar login failure.
 All five Pulse/Cloud PC/Orbit services were rechecked active after deployment.
 
-Native Codex CLI 0.150.1 is installed on the VPS but `pulse` remains signed out.
-The official browser sign-in reached account consent; final authorization was
-not granted. A specific approval request is outstanding for persistent VPS
-access to Aiden's ChatGPT plan. Device codes are temporary, not project config.
-No OpenAI API payment, key creation, or security-setting change was performed.
+Native Codex CLI 0.150.1 is signed in after explicit owner authorization. A real
+request returned ORBIT_AUTH_OK. Credentials now live outside the checkout under
+/var/lib/pulse/codex (0700 directory, 0600 auth). The original login credential
+was moved to a private backup outside Git. No API payment/key creation occurred.
+The isolated decision adapter returned runtime_health in a live request under
+the worker's service restrictions. A real worker task completed with independent
+health verification, using Codex without fallback. Catalog-verified Luna also
+returned a valid decision. Simple tasks use Luna, coding uses Sol, difficult
+tasks use Sol with higher reasoning. All roles remain configurable.
+An injected Codex failure successfully used real AWS with identical context.
+This proves fallback behavior, not an actual observed OpenAI outage.
 
 - OpenAI personal API organization inspected through real saved-account login:
   no API keys, $0.00 credit, no funded billing. Primary API activation needs a
   spending decision/credentials; no payment or new key was created.
-- Real authenticated website session across restart needs an actual owner login.
-- Native Codex CLI is not connected; the configured code-model role requires
-  activation. A real naturally enqueued iCloud Mail event investigation initially
+- A real Pulse password login succeeded inside the persistent Cloud PC browser.
+  /api/auth/status returned authenticated=true/configured=true before and after
+  restarting pulse-cloudpc. Runtime identity was unchanged. No fabricated cookie,
+  auth bypass, or password-manager storage was used. Other sites' logins still
+  need their own account setup and may require owner MFA.
+- A real naturally enqueued iCloud Mail event investigation initially
   failed on SQLite access. After the existing mount fix, resuming the same task
   completed with browser source observation and independent finish verification
   (task 7044d1c5314c446d83ad512f565a20cb). This verifies live source-to-Orbit
@@ -122,6 +132,7 @@ No OpenAI API payment, key creation, or security-setting change was performed.
 
 ## Next
 
-Activate funded OpenAI/native Codex access and verify actual requests;
-complete a real owner website login in Cloud PC and restart check. All other current foundation
-work is deployed. Keep this full goal active while these gates remain unmet.
+Final validation of the enabled role configuration and owner Discord reply.
+Separate OpenAI API billing is still unfunded but is no longer required for
+the verified official Codex/ChatGPT decision path. A naturally new useful finding
+delivery remains conditional on real source developments, not manufactured QA.

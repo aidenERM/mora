@@ -107,17 +107,17 @@ class Router:
 
     def choose(self, task):
         mode = task["model"]
+        role = mode
+        if role == "auto":
+            role = "codex" if re.search(r"\b(repository|code|coding|fix|tests?|debug|implement)\b", task["goal"].lower()) else "strong" if re.search(r"\b(complex|thorough|architecture)\b", task["goal"].lower()) else "fast"
         key = os.environ.get("ORBIT_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
         if os.environ.get("ORBIT_CODEX_ENABLED") == "1" and mode in {"auto", "codex", "sol", "fast", "strong", "openai"}:
-            model = os.environ.get("ORBIT_CODEX_MODEL_" + mode.upper()) or os.environ.get("ORBIT_CODEX_MODEL")
+            model = os.environ.get("ORBIT_CODEX_MODEL_" + role.upper()) or os.environ.get("ORBIT_CODEX_MODEL")
             if not model:
                 raise ConfigurationError("codex_model_not_configured")
             return "codex", model
         if mode == "aws" or (mode == "auto" and (not key or not os.environ.get("ORBIT_OPENAI_MODEL"))):
             return "aws", self.config.get("BEDROCK_MODEL_ID")
-        role = mode
-        if role == "auto":
-            role = "codex" if re.search(r"\b(repository|code|coding|fix|tests?|debug|implement)\b", task["goal"].lower()) else "strong" if re.search(r"\b(complex|thorough|architecture)\b", task["goal"].lower()) else "fast"
         model = os.environ.get("ORBIT_MODEL_" + role.upper()) or os.environ.get("ORBIT_OPENAI_MODEL")
         if not key or not model:
             raise ConfigurationError("openai_key_or_model_not_configured")
@@ -187,7 +187,8 @@ class Router:
             from .codex_provider import decide
             if time.monotonic() >= self.primary_after:
                 try:
-                    return decide(context, model, INSTRUCTIONS)
+                    effort = "high" if task["model"] == "strong" or re.search(r"\b(complex|thorough|architecture)\b", task["goal"].lower()) else "low"
+                    return decide(context, model, INSTRUCTIONS, effort)
                 except (ProviderError, ValueError, KeyError):
                     self.primary_after = time.monotonic() + 120
             value, metadata = invoke_json(self.config, INSTRUCTIONS, context, FIELDS)

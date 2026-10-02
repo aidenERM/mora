@@ -63,7 +63,7 @@ class Engine:
                     step = self.store.start_step(task_id, action, args)
                     self.store.state("last_provider", usage)
                     if usage.get("fallback_from"):
-                        self.memory.notice(task_id, "fallback", "OpenAI failed. I’m continuing this task through AWS with the same context.")
+                        self.memory.notice(task_id, "fallback", "the main connection failed, continuing with the backup")
                     if action == "finish":
                         proposed_checks = json.loads(decision["verification"] or "[]")
                         with self.store.connect() as db:

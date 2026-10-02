@@ -6,8 +6,10 @@ import subprocess
 import tempfile
 
 
-def decide(payload, model, instructions):
+def decide(payload, model, instructions, effort='low'):
     from .providers import FIELDS, ProviderError
+    if effort not in {'low', 'high'}:
+        raise ProviderError('invalid_codex_effort')
     home = Path(os.environ['ORBIT_CODEX_HOME'])
     # Credentials are managed by official Codex login, never read into the prompt.
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'LANG', 'SSL_CERT_FILE') if key in os.environ}
@@ -29,7 +31,7 @@ def decide(payload, model, instructions):
                         'code_mode', 'code_mode_host', 'image_generation'):
             args += ['-c', f'features.{feature}=false']
         args += ['-c', 'web_search="disabled"', '-c', 'agents.enabled=false',
-                 '-c', 'model_reasoning_effort="low"',
+                 '-c', 'model_reasoning_effort=' + json.dumps(effort),
                  '-c', 'developer_instructions=' + json.dumps(instructions + '\nDo not use native tools. Return only the next Orbit decision.'), '-']
         try:
             result = subprocess.run(args, input=json.dumps(payload), text=True,

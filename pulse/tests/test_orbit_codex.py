@@ -18,6 +18,17 @@ def test_codex_enabled_routes_auto_and_explicit_without_api_key(monkeypatch):
     assert router.choose({'model': 'aws', 'goal': 'inspect'}) == ('aws', 'aws')
 
 
+def test_native_auto_selects_configured_task_role(monkeypatch):
+    monkeypatch.setenv('ORBIT_CODEX_ENABLED','1')
+    monkeypatch.setenv('ORBIT_CODEX_MODEL','normal')
+    for role in ('FAST','STRONG','CODEX'):
+        monkeypatch.setenv('ORBIT_CODEX_MODEL_'+role,role.lower())
+    r=Router({'BEDROCK_MODEL_ID':'aws'})
+    assert r.choose({'model':'auto','goal':'latest Apple news'}) == ('codex','fast')
+    assert r.choose({'model':'auto','goal':'fix repository tests'}) == ('codex','codex')
+    assert r.choose({'model':'auto','goal':'complex architecture'}) == ('codex','strong')
+
+
 def test_native_decision_uses_schema_and_no_execution_tools(tmp_path, monkeypatch):
     from orbit.codex_provider import decide
     monkeypatch.setenv('ORBIT_CODEX_HOME', str(tmp_path))
