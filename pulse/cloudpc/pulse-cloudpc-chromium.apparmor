@@ -1,0 +1,10 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Permit Chromium's own sandbox only for the root-owned installed binaries.
+profile pulse-cloudpc-chrome /opt/pulse-cloudpc/browsers/chromium-*/chrome-linux64/chrome flags=(unconfined) {
+    userns,
+}
+profile pulse-cloudpc-headless /opt/pulse-cloudpc/browsers/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell flags=(unconfined) {
+    userns,
+}

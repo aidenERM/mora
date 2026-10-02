@@ -1,0 +1,30 @@
+[Unit]
+Description=Pulse private Cloud PC runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pulse-cloudpc
+Group=pulse-cloudpc
+SupplementaryGroups=pulse-cloudpc-control
+WorkingDirectory=/opt/pulse-cloudpc
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/pulse-cloudpc/browsers
+ExecStart=/opt/pulse-cloudpc/.venv/bin/python /opt/pulse-cloudpc/runtime.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+UMask=0077
+StateDirectory=pulse-cloudpc
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/pulse-cloudpc
+InaccessiblePaths=-/etc/pulse.env -/var/lib/pulse
+MemoryMax=1G
+CPUQuota=100%
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
