@@ -109,9 +109,11 @@ request returned ORBIT_AUTH_OK. Credentials now live outside the checkout under
 was moved to a private backup outside Git. No API payment/key creation occurred.
 The isolated decision adapter returned runtime_health in a live request under
 the worker's service restrictions. A real worker task completed with independent
-health verification, using Codex without fallback. Catalog-verified Luna also
-returned a valid decision. Simple tasks use Luna, coding uses Sol, difficult
-tasks use Sol with higher reasoning. All roles remain configurable.
+health verification, using Codex without fallback. Catalog-verified Luna returned
+a valid single decision but looped in actual multi-step Discord QA. It is NOT
+the production default. Simple/coding tasks use Sol with low reasoning; difficult
+tasks use higher reasoning. Cheaper model routing remains configurable, but its
+live multi-step reliability is unproven and must be tested before enabling.
 An injected Codex failure successfully used real AWS with identical context.
 This proves fallback behavior, not an actual observed OpenAI outage.
 
