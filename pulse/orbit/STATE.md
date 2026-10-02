@@ -94,6 +94,20 @@ code-model role, not an authenticated native Codex CLI. AWS currently powers Orb
 
 ## External blockers / unverified
 
+Communication update a01c27c is deployed: concise casual summaries, no routine
+task references in acknowledgments, technical evidence only when requested.
+Verification and approval requirements are unchanged. Full suite: 128 passed,
+one upstream audioop deprecation warning. A real production Bedrock reply test
+reported an expired calendar session in one plain-language sentence. This was
+a synthetic-input provider test, not proof of a real calendar login failure.
+All five Pulse/Cloud PC/Orbit services were rechecked active after deployment.
+
+Native Codex CLI 0.150.1 is installed on the VPS but `pulse` remains signed out.
+The official browser sign-in reached account consent; final authorization was
+not granted. A specific approval request is outstanding for persistent VPS
+access to Aiden's ChatGPT plan. Device codes are temporary, not project config.
+No OpenAI API payment, key creation, or security-setting change was performed.
+
 - OpenAI personal API organization inspected through real saved-account login:
   no API keys, $0.00 credit, no funded billing. Primary API activation needs a
   spending decision/credentials; no payment or new key was created.
