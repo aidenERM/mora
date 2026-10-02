@@ -103,3 +103,15 @@ def test_used_approval_cannot_expire_and_block_later_work(tmp_path):
     with store.connect() as db:
         db.execute("UPDATE approvals SET expires=0")
     assert store.claim()["id"] == task["id"]
+
+
+def test_aws_vision_observation_feeds_normal_planner(monkeypatch):
+    monkeypatch.setenv("ORBIT_AWS_VISION_MODEL", "verified-vision-model")
+    client = Mock()
+    client.converse.return_value = {"stopReason": "end_turn", "output": {"message": {"content": [{"text": "Main heading: Example Domain"}]}}, "usage": {"inputTokens": 100}}
+    monkeypatch.setattr("orbit.providers._client", lambda _: client)
+    planner = Mock(return_value=({"action": "finish"}, {"provider": "aws"}))
+    monkeypatch.setattr("orbit.providers.invoke_json", planner)
+    _, meta = Router({"BEDROCK_MODEL_ID": "planner"}).decide({"model": "aws", "goal": "inspect"}, {}, {"format": "png", "bytes": b"fixture"})
+    assert planner.call_args.args[2]["image_observation"] == "Main heading: Example Domain"
+    assert meta["vision_model"] == "verified-vision-model"

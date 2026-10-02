@@ -22,7 +22,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/pulse/orbit
+# SQLite may create journal/shared-memory sidecars even for mode=ro readers.
+# Context/history connectors still enforce mode=ro; model tools cannot write here.
+ReadWritePaths=/var/lib/pulse
 MemoryMax=256M
 
 [Install]

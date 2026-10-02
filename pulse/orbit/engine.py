@@ -44,8 +44,11 @@ class Engine:
                                "woke_from_schedule": bool(task["wake_at"] and task["wake_at"] <= time.time()),
                                "remaining_steps": task["max_steps"] - task["steps"]}
                     self.store.reserve_decision(task_id, task["max_steps"] + 2)
-                    image = self.tools.vision(history[-1]["observation"]) if history and history[-1]["action"] == "image_inspect" and history[-1]["status"] == "observed" else None
+                    image = self.tools.vision(history[-1]["observation"]) if history and history[-1]["action"] == "image_inspect" and history[-1]["status"] == "observed" and not history[-1]["observation"].get("description") else None
                     decision, usage = self.router.decide(task, context, image) if image else self.router.decide(task, context)
+                    if image and usage.get("image_observation"):
+                        self.store.finish_step(history[-1]["id"], {**history[-1]["observation"],
+                            "description": usage["image_observation"], "vision_model": usage.get("vision_model")})
                     if self.store.task(task_id)["status"] != "running":
                         return self.store.task(task_id)
                     if stopping and stopping():
