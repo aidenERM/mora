@@ -18,6 +18,7 @@ TOOLS = {
     "image_inspect": "Request vision for an uploaded image or saved screenshot. arguments: {path} OR {artifact}; needs configured vision model",
     "shell": "Run workspace shell command. arguments: {command,timeout?,cwd?}; risky commands require approval",
     "file_read": "Read workspace UTF-8 file by line range. arguments: {path,start_line?,max_lines?}; default 60 lines",
+    "file_info": "Read-only size/SHA-256 of uploaded binary/text files or screenshot artifacts. arguments: {path} OR {artifact}. Prefer this over shell hashing; usable in completion checks",
     "file_write": "Write workspace UTF-8 file. arguments: {path,content,overwrite?}",
     "file_patch": "Replace one exact old fragment in an existing file; preserves unrelated content and checks concurrent edits. arguments: {path,old,new}",
     "runtime_health": "Read runtime identity/health. arguments: {}",
@@ -28,7 +29,7 @@ ENDPOINTS = {"browser_state": "/v1/browser/state", "browser_observe": "/v1/brows
              "browser_click": "/v1/browser/click", "browser_type": "/v1/browser/type",
              "browser_screenshot": "/v1/browser/screenshot", "shell": "/v1/shell",
              "file_read": "/v1/files/read", "file_write": "/v1/files/write", "runtime_health": "/v1/health"}
-READ_TOOLS = {"file_read", "browser_state", "browser_observe", "runtime_health", "browser_screenshot", "image_inspect", "pulse_context", "pulse_events"}
+READ_TOOLS = {"file_read", "file_info", "browser_state", "browser_observe", "runtime_health", "browser_screenshot", "image_inspect", "pulse_context", "pulse_events"}
 
 
 def safe_shell(command):
@@ -88,6 +89,19 @@ class Tools:
         if action in {"pulse_context", "pulse_events"}:
             from .context import read_context
             return read_context(arguments.get("query", "") if action == "pulse_events" else None)
+        if action == "file_info":
+            if arguments.get("artifact"):
+                source = (self.artifacts / arguments["artifact"]).resolve()
+                if not source.is_relative_to(self.artifacts.resolve()) or source.stat().st_size > 1024 * 1024:
+                    raise ValueError("invalid artifact")
+                raw = source.read_bytes()
+                return {"artifact": arguments["artifact"], "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+            path = arguments.get("path", "")
+            if not isinstance(path, str) or Path(path).is_absolute() or ".." in Path(path).parts or any(part.startswith(".env") or part.lower() in {"credentials", "secrets", "token", "session.json"} for part in Path(path).parts):
+                raise ValueError("workspace-relative non-secret path required")
+            result = self.client.request("/v1/files/read", {"path": path, "encoding": "base64"})
+            raw = base64.b64decode(result["content"], validate=True)
+            return {"path": path, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
         if action in {"browser_click", "browser_type"} and not arguments.get("_binding"):
             raise ValueError("browser interaction requires an approved state binding")
         if action == "image_inspect":

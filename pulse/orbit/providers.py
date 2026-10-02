@@ -21,6 +21,8 @@ that independently prove the goal. Tool success alone does not prove goal comple
 The expect field must be a nonempty object matching exact result fields, e.g.
 [{"tool":"file_read","arguments":{"path":"note.txt"},"expect":{"content":"hello"}}].
 For title checks use browser_state with arguments {} and expect {"title":"observed title"}.
+For uploaded files and screenshot hashes use file_info; do not verify sha256sum through shell.
+Shell verification only permits pwd/ls. For other read-only checks use the dedicated tools.
 Never use browser_navigate or file_write inside verification; they change state.
 For wait use an ISO 8601 future wake_at and explain what you await. For block explain missing input.
 If woke_from_schedule is true, execute the original goal now instead of deferring its relative date again.

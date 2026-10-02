@@ -63,3 +63,15 @@ def test_file_patch_preserves_unrelated_text_and_checks_concurrent_edits(tmp_pat
     client.request.side_effect = [{"content": "old old"}]
     with pytest.raises(ValueError):
         Tools(tmp_path, client).invoke("file_patch", {"path": "source.py", "old": "old", "new": "new"}, 2)
+
+
+def test_binary_metadata_can_independently_verify_without_shell(tmp_path):
+    import hashlib
+    client = Mock()
+    raw = b"non-sensitive binary fixture"
+    client.request.return_value = {"content": base64.b64encode(raw).decode()}
+    tools = Tools(tmp_path, client)
+    expected = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    assert tools.verify([{"tool": "file_info", "arguments": {"path": "inbox/file.png"}, "expect": expected}])[0]["verified"]
+    with pytest.raises(ValueError):
+        tools.invoke("file_info", {"path": "../profile/session.json"}, 1)
