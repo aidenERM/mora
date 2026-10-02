@@ -38,6 +38,15 @@ def intent(text):
     return "goal", text
 
 
+def notice_text(notice):
+    text = clean(notice['text'])
+    if notice['kind'] in {'failed', 'blocked'} and text.startswith('Task stopped:'):
+        if 'provider_not_configured' in text:
+            return "that connection isn't set up yet"
+        return "i got stuck partway through and couldn't finish that"
+    return text
+
+
 class Approval(discord.ui.View):
     def __init__(self, bot, step):
         super().__init__(timeout=None)
@@ -210,7 +219,7 @@ class OrbitDiscord(discord.Client):
         try:
             owner = await self.fetch_user(self.owner_id)
             kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
-            text = clean(notice["text"])
+            text = notice_text(notice)
             if notice["kind"].startswith("approval-"):
                 step_id = int(notice["kind"].split("-", 1)[1])
                 with self.store.connect() as db:

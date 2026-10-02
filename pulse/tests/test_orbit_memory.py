@@ -86,6 +86,14 @@ def test_discord_ignores_other_users_and_guilds(tmp_path):
     assert bot.store.list() == []
 
 
+def test_dm_failure_explains_problem_without_internal_exception():
+    from orbit.discord_dm import notice_text
+    assert notice_text({'kind':'failed','text':'Task stopped: ValueError'}) == "i got stuck partway through and couldn't finish that"
+    assert notice_text({'kind':'blocked','text':'Task stopped: provider_not_configured'}) == "that connection isn't set up yet"
+    assert notice_text({'kind':'completed','text':'done, saved it'}) == 'done, saved it'
+    assert notice_text({'kind':'approval-5','text':'delete a file?'}) == 'delete a file?'
+
+
 def test_discord_natural_goal_and_explicit_memory(tmp_path):
     from orbit.discord_dm import OrbitDiscord
     bot = OrbitDiscord(Store(tmp_path / "orbit.sqlite3"), owner_id=123)
