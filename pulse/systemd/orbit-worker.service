@@ -1,0 +1,29 @@
+[Unit]
+Description=Pulse Orbit task worker
+After=network-online.target pulse-cloudpc.service
+Wants=network-online.target pulse-cloudpc.service
+
+[Service]
+Type=simple
+User=pulse
+Group=pulse
+SupplementaryGroups=pulse-cloudpc-control
+WorkingDirectory=/opt/pulse/pulse
+EnvironmentFile=/etc/pulse.env
+EnvironmentFile=-/etc/pulse-integrations.env
+EnvironmentFile=-/etc/pulse-oauth.env
+EnvironmentFile=-/etc/orbit.env
+ExecStart=/opt/pulse/.venv/bin/python -m orbit.worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pulse/orbit
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

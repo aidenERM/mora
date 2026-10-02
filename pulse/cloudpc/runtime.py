@@ -197,6 +197,18 @@ def handler(runtime, token):
                                      "started_at": runtime.started_at, "workspace": str(runtime.workspace)})
                 elif self.path == "/v1/browser/state":
                     self.reply(200, {"url": runtime.page.url, "title": runtime.page.title()})
+                elif self.path == "/v1/browser/observe":
+                    visible = runtime.page.evaluate('''() => ({
+                        text: (document.body?.innerText || '').slice(0, 8000),
+                        elements: [...document.querySelectorAll('a,button,input,textarea,select,[role="button"]')]
+                            .filter(e => e.getClientRects().length).slice(0, 60).map((e,i) => {
+                                e.setAttribute('data-orbit-ref', String(i));
+                                return {selector: '[data-orbit-ref="'+i+'"]', tag: e.tagName.toLowerCase(),
+                                    label: (e.getAttribute('aria-label') || e.innerText || e.getAttribute('placeholder') || '').slice(0,120),
+                                    type: e.getAttribute('type') || '', href: e.getAttribute('href') || ''};
+                            })
+                    })''')
+                    self.reply(200, {"url": runtime.page.url, "title": runtime.page.title(), **visible})
                 elif self.path == "/v1/browser/screenshot":
                     self.reply(200, runtime.page.screenshot(type="png"), "image/png")
                 else:
