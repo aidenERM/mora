@@ -108,6 +108,11 @@ class Router:
     def choose(self, task):
         mode = task["model"]
         key = os.environ.get("ORBIT_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if os.environ.get("ORBIT_CODEX_ENABLED") == "1" and mode in {"auto", "codex", "sol", "fast", "strong", "openai"}:
+            model = os.environ.get("ORBIT_CODEX_MODEL_" + mode.upper()) or os.environ.get("ORBIT_CODEX_MODEL")
+            if not model:
+                raise ConfigurationError("codex_model_not_configured")
+            return "codex", model
         if mode == "aws" or (mode == "auto" and (not key or not os.environ.get("ORBIT_OPENAI_MODEL"))):
             return "aws", self.config.get("BEDROCK_MODEL_ID")
         role = mode
@@ -178,6 +183,15 @@ class Router:
             return value, {**metadata, "vision": True, "vision_model": aws_model,
                            "image_observation": description, "vision_usage": response.get("usage", {})}
         provider, model = self.choose(task)
+        if provider == "codex":
+            from .codex_provider import decide
+            if time.monotonic() >= self.primary_after:
+                try:
+                    return decide(context, model, INSTRUCTIONS)
+                except (ProviderError, ValueError, KeyError):
+                    self.primary_after = time.monotonic() + 120
+            value, metadata = invoke_json(self.config, INSTRUCTIONS, context, FIELDS)
+            return value, {**metadata, "provider": "aws", "fallback_from": "codex"}
         if provider == "openai":
             if time.monotonic() < self.primary_after:
                 value, metadata = invoke_json(self.config, INSTRUCTIONS, context, FIELDS)

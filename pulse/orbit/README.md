@@ -87,6 +87,17 @@ values; changed state invalidates execution. Password entry needs private manual
 setup rather than storing a password task.
 
 Provider retries are bounded, with a 120-second OpenAI outage circuit cooldown.
+The optional official Codex CLI adapter uses an explicitly authorized ChatGPT
+login, not a copied API key or reverse-engineered token. Keep `CODEX_HOME` outside
+the checkout, mode 0700, with auth files mode 0600. Configure `ORBIT_CODEX_HOME`
+and a verified `ORBIT_CODEX_MODEL`, then enable `ORBIT_CODEX_ENABLED=1` only after
+a live decision test. `systemd/orbit-codex.conf` contains production non-secret
+settings. CLI tools/connectors are disabled, its sandbox is read-only, its
+environment excludes provider/bot secrets, and its schema-validated decisions
+still go through Orbit's existing tools and approvals. Native tool output is
+rejected. Codex errors fall back to AWS with the same context and a 120-second
+cooldown. Keep the CLI version validated when upgrading; included plan limits
+still apply. This does not activate or fund the separate OpenAI API.
 Optional `ORBIT_VISION_MODEL` / `ORBIT_AWS_VISION_MODEL` enable one requested
 PNG/JPEG at a time. Missing vision configuration blocks with an explanation.
 
