@@ -1,0 +1,4 @@
+{
+  "blocked_tools": [],
+  "automatic_shell_commands": ["pwd", "ls"]
+}

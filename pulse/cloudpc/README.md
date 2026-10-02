@@ -45,6 +45,8 @@ The client reads the token from disk without exposing it in command arguments.
 | POST | `/v1/browser/navigate` | `{"url":"https://example.com"}` |
 | POST | `/v1/browser/click` | `{"selector":"button"}` |
 | POST | `/v1/browser/type` | `{"selector":"input","text":"hello"}` |
+| POST | `/v1/browser/describe` | `{"selector":"button"}`; approval context/fingerprints |
+| GET | `/v1/browser/observe` | Bounded visible text and actionable selectors |
 | GET | `/v1/browser/state` | Current URL and title |
 | GET | `/v1/browser/screenshot` | Private PNG bytes |
 | POST | `/v1/shell` | `{"command":"pwd","timeout":30,"cwd":"subdirectory"}`; cwd optional |
@@ -52,6 +54,10 @@ The client reads the token from disk without exposing it in command arguments.
 | POST | `/v1/files/write` | `{"path":"notes/example.txt","content":"hello","overwrite":false}` |
 
 File API paths stay inside `workspace/`, including resolved symlinks.
+Reads accept `start_line`/`max_lines`; read/write accept `encoding: "base64"`
+for bounded binary files. `expected_sha256` rejects stale writes. Creation and
+replacement are atomic. Click/type can carry `_binding` from describe; changed
+page, element or form state rejects the action.
 Shell is intentionally powerful but executes as the dedicated Linux user, with
 bounded time/output and without Pulse provider secrets in its environment.
 Requests serialize onto one browser to prevent competing callers corrupting it.

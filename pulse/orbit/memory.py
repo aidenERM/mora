@@ -89,3 +89,17 @@ class Memory:
         with self.store.connect() as db:
             # Discord may have received an interrupted send. Do not blindly duplicate it.
             db.execute("UPDATE notices SET status='unknown' WHERE status='sending'")
+
+    def maintain(self, now=None):
+        now = now or time.time()
+        with self.store.connect() as db:
+            db.execute("DELETE FROM conversations WHERE created<?", (now - 14 * 86400,))
+            db.execute("DELETE FROM memories WHERE expires IS NOT NULL AND expires<=?", (now,))
+            db.execute("DELETE FROM steps WHERE created<? AND task_id IN (SELECT id FROM tasks WHERE status IN ('completed','cancelled','failed'))", (now - 90 * 86400,))
+            # Keep useful task identity/result, but do not preserve raw conversation
+            # snapshots inside old task metadata after the DM retention window.
+            for row in db.execute("SELECT id,metadata FROM tasks WHERE created<? LIMIT 200", (now - 14 * 86400,)).fetchall():
+                metadata = json.loads(row["metadata"])
+                if "conversation" in metadata:
+                    metadata.pop("conversation")
+                    db.execute("UPDATE tasks SET metadata=? WHERE id=?", (json.dumps(metadata), row["id"]))

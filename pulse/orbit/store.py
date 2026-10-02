@@ -4,10 +4,12 @@ from pathlib import Path
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 
 from .security import clean
 
 STATES = {"queued", "running", "waiting", "waiting_approval", "completed", "failed", "blocked", "cancelled"}
+MODELS = {"auto", "aws", "sol", "codex", "fast", "strong", "openai"}
 
 
 class Store:
@@ -38,18 +40,23 @@ class Store:
             ''')
         Path(self.path).chmod(0o600)
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def create(self, goal, model="auto", max_steps=12, source="cli", source_key=None, metadata=None, wake_at=None):
         if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 8000:
             raise ValueError("goal must contain 1–8000 characters")
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 40:
             raise ValueError("max_steps must be between 1 and 40")
-        if model not in {"auto", "aws", "sol", "codex", "fast", "strong", "openai"}:
+        if model not in MODELS:
             raise ValueError("unknown model selection")
         task_id, now = uuid.uuid4().hex, time.time()
         with self.connect() as db:
@@ -95,10 +102,34 @@ class Store:
             db.execute("UPDATE tasks SET status='queued',error='',wake_at=NULL,updated=? WHERE id=?", (time.time(), task_id))
         return self.task(task_id)
 
+    def select_model(self, task_id, model):
+        if model not in MODELS:
+            raise ValueError("unknown model selection")
+        with self.connect() as db:
+            db.execute("UPDATE tasks SET model=?,updated=? WHERE id=? AND status NOT IN ('completed','cancelled')", (model, time.time(), task_id))
+        task = self.task(task_id)
+        if task["status"] == "blocked" and task["error"] == "provider_not_configured":
+            self.resume(task_id)
+        return self.task(task_id)
+
+    def reserve_decision(self, task_id, limit):
+        key = "decision_calls:" + task_id
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
+            count = json.loads(row[0]) if row else 0
+            if count >= limit:
+                raise ValueError("decision_budget_exhausted")
+            db.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(count + 1)))
+
     def claim(self):
         now = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            expired = db.execute("SELECT task_id FROM approvals WHERE status IN ('pending','approved') AND expires<=?", (now,)).fetchall()
+            for row in expired:
+                db.execute("UPDATE tasks SET status='blocked',error='approval_expired',updated=? WHERE id=? AND status IN ('waiting_approval','queued')", (now, row[0]))
+            db.execute("UPDATE approvals SET status='expired' WHERE status IN ('pending','approved') AND expires<=?", (now,))
             db.execute("UPDATE tasks SET status='queued' WHERE status='waiting' AND wake_at<=?", (now,))
             row = db.execute("SELECT id FROM tasks WHERE status='queued' ORDER BY created LIMIT 1").fetchone()
             if not row:
@@ -116,6 +147,8 @@ class Store:
     def finish_step(self, step_id, observation, status="observed"):
         with self.connect() as db:
             db.execute("UPDATE steps SET status=?,observation=?,updated=? WHERE id=?", (status, json.dumps(clean(observation)), time.time(), step_id))
+            if status in {"observed", "failed", "verified"}:
+                db.execute("UPDATE approvals SET status='used' WHERE step_id=? AND status='approved'", (step_id,))
 
     def history(self, task_id, limit=8):
         with self.connect() as db:
@@ -142,7 +175,7 @@ class Store:
 
     def approved_step(self, task_id):
         with self.connect() as db:
-            row = db.execute("SELECT s.* FROM steps s JOIN approvals a ON a.step_id=s.id WHERE s.task_id=? AND a.status='approved' AND s.status='approval'", (task_id,)).fetchone()
+            row = db.execute("SELECT s.* FROM steps s JOIN approvals a ON a.step_id=s.id WHERE s.task_id=? AND a.status='approved' AND a.expires>? AND s.status='approval'", (task_id, time.time())).fetchone()
         return {**dict(row), "arguments": json.loads(row["arguments"])} if row else None
 
     def recover(self):

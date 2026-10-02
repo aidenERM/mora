@@ -1,6 +1,7 @@
 """Single private Linux runtime. Only a trusted Pulse caller may control it."""
 import hmac
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -67,6 +68,23 @@ class Runtime:
             "url": self.page.url, "cookies": self.context.cookies(),
         })
 
+    def describe(self, selector):
+        element = self.page.locator(selector).evaluate('''e => ({
+            tag: e.tagName.toLowerCase(), type: e.getAttribute('type') || '',
+            label: (e.getAttribute('aria-label') || e.innerText || e.getAttribute('placeholder') || '').slice(0,160),
+            href: e.getAttribute('href') || '', form_action: e.form?.action || '', html: e.outerHTML,
+            fields: [...(e.form || e.closest('[role="dialog"]') || document.body).querySelectorAll('input,textarea,select')]
+                .slice(0,20).map(n => ({name: n.name || n.id || '', type: n.type || n.tagName.toLowerCase(), value: n.value || ''}))
+        })''')
+        element["html_hash"] = hashlib.sha256(element.pop("html").encode()).hexdigest()
+        fields = element.pop("fields")
+        if sum(len(field["value"]) for field in fields) > 256000 or any(len(field["value"]) > 65536 for field in fields):
+            raise ValueError("form too large for reliable approval review")
+        element["fields_hash"] = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
+        element["form_context"] = [{"name": field["name"], "value": field["value"]} for field in fields
+            if field["type"] not in {"password", "hidden"} and not any(word in field["name"].lower() for word in ("password", "token", "secret", "key", "csrf", "otp", "code", "session", "authorization"))]
+        return {"url": self.page.url, "title": self.page.title(), "element": element}
+
     def close(self):
         try:
             self.checkpoint()
@@ -129,7 +147,17 @@ class Runtime:
             encoding = body.get("encoding", "utf-8")
             if encoding not in {"utf-8", "base64"}:
                 raise ValueError("unsupported encoding")
-            return {"path": body["path"], "content": base64.b64encode(content).decode() if encoding == "base64" else content.decode("utf-8"), "encoding": encoding}
+            value = base64.b64encode(content).decode() if encoding == "base64" else content.decode("utf-8")
+            details = {}
+            if encoding == "utf-8":
+                lines = value.splitlines(keepends=True)
+                start = body.get("start_line", 1)
+                count = body.get("max_lines", len(lines) or 1)
+                if type(start) is not int or type(count) is not int or start < 1 or count < 1 or ("max_lines" in body and count > 10000):
+                    raise ValueError("invalid line range")
+                value = "".join(lines[start - 1:start - 1 + count])
+                details = {"total_lines": len(lines), "start_line": start, "truncated": start > 1 or start - 1 + count < len(lines)}
+            return {"path": body["path"], "content": value, "encoding": encoding, "sha256": hashlib.sha256(content).hexdigest(), **details}
         if route == "/v1/files/write":
             path = self.path(body.get("path"))
             content = body.get("content")
@@ -140,20 +168,38 @@ class Runtime:
                 raise ValueError("unsupported encoding")
             raw = base64.b64decode(content, validate=True) if encoding == "base64" else content.encode()
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with path.open("wb" if body.get("overwrite") is True else "xb") as file:
+            if body.get("expected_sha256") and (not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != body["expected_sha256"]):
+                raise ValueError("file changed since read")
+            fd, temporary = tempfile.mkstemp(dir=path.parent)
+            with os.fdopen(fd, "wb") as file:
                 file.write(raw)
-            path.chmod(0o600)
-            return {"path": body["path"], "written": len(raw)}
+                file.flush()
+                os.fsync(file.fileno())
+            try:
+                if body.get("overwrite") is True:
+                    os.replace(temporary, path)
+                else:
+                    os.link(temporary, path)  # Exclusive, atomic create preserves existing files.
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            return {"path": body["path"], "written": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
         if route == "/v1/browser/navigate":
             url = text(body, "url", 8192)
             parsed = urlsplit(url)
             if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("HTTP(S) URL without embedded credentials required")
             self.page.goto(url, wait_until="domcontentloaded")
+        elif route == "/v1/browser/describe":
+            return self.describe(text(body, "selector", 2048))
         elif route == "/v1/browser/click":
+            if body.get("_binding") and self.describe(text(body, "selector", 2048)) != body["_binding"]:
+                raise ValueError("approved browser state changed")
             self.page.locator(text(body, "selector", 2048)).click()
         elif route == "/v1/browser/type":
             selector = text(body, "selector", 2048)
+            if body.get("_binding") and self.describe(selector) != body["_binding"]:
+                raise ValueError("approved browser state changed")
             value = body.get("text")
             if not isinstance(value, str) or len(value) > 65536:
                 raise ValueError("text must be a string up to 64 KiB")

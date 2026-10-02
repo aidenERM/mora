@@ -11,9 +11,10 @@ import discord
 from discord.ext import tasks
 
 from cloudpc.client import CloudPC
-from .memory import Memory
+from .memory import CATEGORIES, Memory
 from .security import clean
 from .store import Store
+from .scheduler import Scheduler, parse_timing
 
 
 def intent(text):
@@ -21,15 +22,17 @@ def intent(text):
     lower = text.lower()
     if lower in {"hi", "hey", "hello", "yo"}:
         return "hello", ""
+    if lower in {"thanks", "thank you", "ok", "okay", "cool", "yep"}:
+        return "ack", ""
     if lower.startswith("remember "):
         return "remember", text[9:].strip()
     if lower.startswith("forget "):
         return "forget", text[7:].strip()
     if lower in {"stop", "cancel", "stop that", "cancel that"}:
         return "cancel", ""
-    if any(phrase in lower for phrase in ("what happened", "what are you doing", "task status")):
+    if any(phrase in lower for phrase in ("what happened while", "what are you doing", "task status")):
         return "status", ""
-    match = re.match(r"(?i)^(?:use|switch to) (aws|sol|codex|auto|fast|strong|openai)(?:\s+(?:for this|for that))?[,:]?\s*(.*)$", text)
+    match = re.match(r"(?i)^(?:use|switch(?: back)? to) (aws|sol|codex|auto|fast|strong|openai)(?:\s+(?:for this|for that))?[,:]?\s*(.*)$", text)
     if match:
         return "model", (match.group(1).lower(), match.group(2))
     return "goal", text
@@ -60,6 +63,7 @@ class OrbitDiscord(discord.Client):
         super().__init__(intents=intents)
         self.store = store or Store()
         self.memory = Memory(self.store)
+        self.scheduler = Scheduler(self.store)
         self.owner_id = int(owner_id or os.environ["ORBIT_DISCORD_USER_ID"])
         self.runtime = CloudPC()
 
@@ -112,9 +116,15 @@ class OrbitDiscord(discord.Client):
         kind, value = intent(text)
         if kind == "hello":
             await message.channel.send("hey. send me what you want done.")
+        elif kind == "ack":
+            await message.channel.send("got it.")
         elif kind == "remember":
             try:
-                memory_id = self.memory.remember(value, source="discord:" + str(message.id), context="explicit user request")
+                category = "preference"
+                prefix, separator, body = value.partition(":")
+                if separator and prefix.lower().strip() in CATEGORIES:
+                    category, value = prefix.lower().strip(), body.strip()
+                memory_id = self.memory.remember(value, category, source="discord:" + str(message.id), context="explicit user request")
                 await message.channel.send("Remembered. Reference: " + memory_id[:8])
             except ValueError:
                 await message.channel.send("That text could not be saved as memory.")
@@ -128,28 +138,65 @@ class OrbitDiscord(discord.Client):
                 await message.channel.send("Give me the memory reference so I remove the right item.")
         elif kind == "status":
             rows = self.store.list(5)
-            await message.channel.send("\n".join(f"{row['status']}: {row['goal'][:100]}" for row in rows) or "No tasks yet.")
+            await message.channel.send("\n".join(f"{row['status']}: {(row['result'] or row['goal'])[:180]}" for row in rows) or "No tasks yet.")
         elif kind == "cancel":
             rows = [row for row in self.store.list() if row["status"] in {"queued", "running", "waiting", "waiting_approval"}]
+            last_user = self.store.state("last_user_task")
+            if last_user:
+                selected = self.store.task(last_user)
+                if selected["status"] in {"queued", "running", "waiting", "waiting_approval"}:
+                    rows = [selected]
             if rows:
-                self.store.cancel(rows[0]["id"])
-            await message.channel.send("Stopped." if rows else "Nothing is running.")
+                current = self.store.task(rows[0]["id"])
+                self.store.cancel(current["id"])
+                schedule_id = current["metadata"].get("schedule_id")
+                if schedule_id:
+                    self.scheduler.disable(schedule_id)
+            else:
+                schedule_id = self.store.state("last_schedule")
+                if schedule_id:
+                    self.scheduler.disable(schedule_id)
+            await message.channel.send("Stopped." if rows or schedule_id else "Nothing is running.")
         elif kind == "model":
             model, goal = value
             self.store.state("default_model", model)
             if goal:
                 await self.submit(message, goal, attachments, model)
             else:
-                await message.channel.send("Selected " + model + ". Unconfigured models will report a blocker.")
+                active = [row for row in self.store.list() if row["status"] in {"queued", "running", "waiting", "waiting_approval", "blocked"}]
+                last_user = self.store.state("last_user_task")
+                active.sort(key=lambda row: row["id"] != last_user)
+                if active:
+                    self.store.select_model(active[0]["id"], model)
+                await message.channel.send("Selected " + model + (" for the current task." if active else ".") + " Unconfigured models will report a blocker.")
         else:
             await self.submit(message, value, attachments)
 
     async def submit(self, message, goal, attachments, model=None):
-        previous = self.store.list(1)
+        previous = None
+        last_user = self.store.state("last_user_task")
+        if last_user:
+            row = self.store.task(last_user)
+            previous = {key: row[key] for key in ("id", "goal", "status", "result", "error")}
+        try:
+            timing = parse_timing(goal)
+        except ValueError:
+            await message.channel.send("Use a valid time. Recurring checks need at least 15 minutes.")
+            return
+        if timing and timing["interval"]:
+            if not timing["goal"]:
+                await message.channel.send("Tell me what you want checked on that schedule.")
+                return
+            schedule = self.scheduler.create(timing["goal"], timing["interval"], timing["wake_at"], model or self.store.state("default_model") or "auto", {"user_id": str(self.owner_id)})
+            self.store.state("last_schedule", schedule)
+            await message.channel.send("Scheduled. Reference: " + schedule[:8])
+            return
         task = self.store.create(goal, model or self.store.state("default_model") or "auto", source="discord", source_key="discord:" + str(message.id),
             metadata={"user_id": str(self.owner_id), "attachments": attachments,
-                      "conversation": self.memory.recent(), "previous_task": previous[0] if previous else None})
-        await message.channel.send("on it. " + task["id"][:8])
+                      "conversation": self.memory.recent(), "previous_task": previous},
+            wake_at=timing["wake_at"] if timing else None)
+        self.store.state("last_user_task", task["id"])
+        await message.channel.send(("Scheduled. " if timing else "on it. ") + task["id"][:8])
 
     @tasks.loop(seconds=5)
     async def deliver(self):
@@ -164,7 +211,13 @@ class OrbitDiscord(discord.Client):
                 step_id = int(notice["kind"].split("-", 1)[1])
                 with self.store.connect() as db:
                     step = db.execute("SELECT action,arguments FROM steps WHERE id=?", (step_id,)).fetchone()
-                proposal = json.dumps({"action": step["action"], "arguments": json.loads(step["arguments"])}, indent=2)
+                arguments = json.loads(step["arguments"])
+                binding = arguments.get("_binding") or {}
+                if binding:
+                    label = binding["element"].get("label") or arguments.get("selector")
+                    text = f"Review: {step['action'].replace('browser_', '').replace('_',' ')} {label}\n{binding['url']}\n{text}\nFull details are attached."
+                proposal = json.dumps({"action": step["action"], "arguments": arguments,
+                    "risk": self.store.state("risk_decision:" + str(step_id))}, indent=2)
                 kwargs["view"] = Approval(self, step_id)
                 kwargs["file"] = discord.File(io.BytesIO(proposal.encode()), filename="proposed-action.json")
             elif notice["artifact"]:

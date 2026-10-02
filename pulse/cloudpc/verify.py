@@ -54,6 +54,13 @@ def main():
         assert client.request("/v1/files/read", {"path": path})["content"] == marker
         shell = client.request("/v1/shell", {"command": "cat " + path})
         assert shell["exit_code"] == 0 and shell["output"] == marker
+        first = client.request("/v1/files/read", {"path": path, "max_lines": 1})
+        assert first["content"] == marker and first["total_lines"] == 1
+        try:
+            client.request("/v1/files/write", {"path": path, "content": "changed", "overwrite": True, "expected_sha256": "stale"})
+            raise AssertionError("stale file overwrite allowed")
+        except HTTPError as exc:
+            assert exc.code == 400
         for bad in ("../session.json", "/etc/pulse-cloudpc/token"):
             try:
                 client.request("/v1/files/read", {"path": bad})
@@ -64,7 +71,13 @@ def main():
         assert timed["timed_out"]
         client.request("/v1/browser/navigate", {"url": "http://127.0.0.1:8793/"})
         client.request("/v1/browser/type", {"selector": "#value", "text": marker})
-        client.request("/v1/browser/click", {"selector": "#save"})
+        binding = client.request("/v1/browser/describe", {"selector": "#save"})
+        try:
+            client.request("/v1/browser/click", {"selector": "#save", "_binding": {**binding, "url": "https://stale.example"}})
+            raise AssertionError("stale browser approval allowed")
+        except HTTPError as exc:
+            assert exc.code == 400
+        client.request("/v1/browser/click", {"selector": "#save", "_binding": binding})
         expected = marker + "|session-cookie"
         assert client.request("/v1/browser/state")["title"] == expected
         image = client.request("/v1/browser/screenshot")

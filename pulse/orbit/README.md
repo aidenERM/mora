@@ -15,6 +15,7 @@ python -m orbit once
 python -m orbit status TASK_ID
 python -m orbit cancel TASK_ID
 python -m orbit resume TASK_ID
+python -m orbit model TASK_ID aws
 python -m orbit approve STEP_ID
 python -m orbit approve STEP_ID --deny
 ```
@@ -63,6 +64,43 @@ Approvals arrive as buttons plus the full proposed action JSON. The worker check
 expiry and single use. Private screenshot artifacts can be sent back to the owner.
 Incoming files are capped at 700 KB; credential attachments are rejected.
 Images are stored as files; model vision is not yet configured.
+
+## Wakeups, providers, and permissions
+
+Requests like `check the file tomorrow at 5pm` or `check every 2 hours` use
+America/Bogota dates. Recurring intervals are 15 minutes to 31 days. `cancel that`
+also disables the associated recurrence. Verified evidence, rather than changed
+summary wording, determines repeated schedule notices.
+
+Install `systemd/pulse-worker-orbit.conf` as
+`/etc/systemd/system/pulse-worker.service.d/orbit.conf` to enable conservative
+Pulse-triggered investigations. They reuse canonical/development identity and
+are capped at two/day after high relevance decisions. New reports need observed
+source evidence and pass Pulse's delivery rules again. Derived reports cannot
+bypass quiet hours; original validated urgent Pulse alerts keep their policy.
+
+Copy `policy.example.json` to root-owned `/etc/orbit-policy.json` to override
+defaults. Conditional commands must be explicitly trusted. Models cannot approve
+actions or edit policy. Whole-file replacement requires review; prefer
+`file_patch` for bounded edits. Browser approvals bind URL, element and form
+values; changed state invalidates execution. Password entry needs private manual
+setup rather than storing a password task.
+
+Provider retries are bounded, with a 120-second OpenAI outage circuit cooldown.
+Optional `ORBIT_VISION_MODEL` / `ORBIT_AWS_VISION_MODEL` enable one requested
+PNG/JPEG at a time. Missing vision configuration blocks with an explanation.
+
+Opt-in live verification using the existing AWS account:
+
+```sh
+python -m orbit.verify --live-aws --fallback-probe
+```
+
+The primary outage is injected; AWS and Cloud PC execution are real. This does
+not verify a configured OpenAI account. API contracts:
+[structured output](https://developers.openai.com/api/docs/guides/structured-outputs),
+[image input](https://developers.openai.com/api/docs/guides/images-vision),
+[Discord Gateway](https://docs.discord.com/developers/events/gateway).
 
 DM delivery requires Discord to permit the bot to contact its owner, commonly
 through a shared server or supported application installation. Startup records

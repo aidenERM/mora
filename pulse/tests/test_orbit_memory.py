@@ -54,6 +54,27 @@ def test_notice_is_deduplicated_and_interrupted_send_not_replayed(tmp_path):
     assert memory.claim_notice() is None
 
 
+def test_periodic_retention_removes_raw_context_but_preserves_active_goals(tmp_path):
+    store = Store(tmp_path / "orbit.sqlite3")
+    memory = Memory(store)
+    active = store.create("keep active goal", metadata={"conversation": [{"text": "old raw message"}]})
+    completed = store.create("finished goal")
+    step = store.start_step(completed["id"], "browser_observe", {})
+    store.finish_step(step, {"text": "old page"})
+    store.change(completed["id"], "completed", result="useful result")
+    memory.conversation("user", "old DM")
+    with store.connect() as db:
+        db.execute("UPDATE tasks SET created=0")
+        db.execute("UPDATE steps SET created=0")
+        db.execute("UPDATE conversations SET created=0")
+    memory.maintain()
+    assert store.task(active["id"])["goal"] == "keep active goal"
+    assert "conversation" not in store.task(active["id"])["metadata"]
+    assert store.task(completed["id"])["result"] == "useful result"
+    assert store.history(completed["id"]) == []
+    assert memory.recent() == []
+
+
 def test_discord_ignores_other_users_and_guilds(tmp_path):
     from orbit.discord_dm import OrbitDiscord
     bot = OrbitDiscord(Store(tmp_path / "orbit.sqlite3"), owner_id=123)

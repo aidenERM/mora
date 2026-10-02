@@ -17,6 +17,9 @@ def main():
     cancel.add_argument("id")
     resume = commands.add_parser("resume")
     resume.add_argument("id")
+    selection = commands.add_parser("model")
+    selection.add_argument("id")
+    selection.add_argument("selection")
     approval = commands.add_parser("approve")
     approval.add_argument("step_id", type=int)
     approval.add_argument("--deny", action="store_true")
@@ -31,6 +34,8 @@ def main():
         result = store.cancel(args.id)
     elif args.command == "resume":
         result = store.resume(args.id)
+    elif args.command == "model":
+        result = store.select_model(args.id, args.selection)
     elif args.command == "approve":
         store.approve(args.step_id, not args.deny)
         result = {"ok": True}

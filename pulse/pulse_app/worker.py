@@ -195,6 +195,11 @@ def run_once(config: dict | None = None) -> dict:
             if sent_this_run >= int(runtime.get("MAX_NOTIFICATIONS_PER_RUN", 2)):
                 break
             try:
+                from orbit.scheduler import enqueue_pulse_event
+                enqueue_pulse_event(event, trace)
+            except Exception as exc:
+                LOGGER.warning("Orbit wake skipped: %s", type(exc).__name__)
+            try:
                 result = _send_event(conn, config, event)
                 notifications += int(result.get("sent", 0))
                 sent_this_run += 1
