@@ -43,7 +43,7 @@ Phase 2: 25 tests. Official Discord bot/application identity verified, owner
 resolved, Gateway connected, initial private DM accepted. Credentials exist only
 in root-owned `/etc/orbit.env` (0600), not source/model prompts.
 
-Latest full local suite: 125 passed, including startup transport regressions.
+Latest full local suite before browser QA: 125 passed, including startup transport regressions.
 Syntax checks passed; provided bot token absent from staged files.
 
 Current-group live proof: authenticated/path-confined Cloud PC survived restart,
@@ -62,6 +62,28 @@ The owner's real greeting arrived, verifying inbound DMs. This exposed a stale
 connection flag after Gateway resume; resume and accepted owner messages now
 restore that flag. Nine targeted memory/Discord tests passed for this fix.
 
+## Real browser QA activation
+
+Using the owner's signed-in Chrome session: a natural DM goal opened Example
+Domain, read visible text, returned a real PNG and independently verified title.
+A real Approve button resumed browser_click and reached IANA's example-domains
+page. A PNG pasted through the browser clipboard was received, saved and its
+68-byte size/SHA-256 independently verified. File-picker uploads require the
+extension's optional file-URL permission; that permission was not expanded.
+
+Browser QA found two real issues: binary completion checks attempted forbidden
+shell verification; a confined file_info tool now provides size/hash checks.
+SQLite readers under the worker's strict mount could not create sidecar files;
+the mount now permits the Pulse state directory while connectors enforce mode=ro.
+
+AWS vision model availability was checked with real account APIs. Nova Lite
+returned an inaccurate description on multilingual content; that result and its
+derived memory were invalidated. Already-authorized Claude Haiku 4.5 via
+global.anthropic.claude-haiku-4-5-20251001-v1:0 now provides bounded requested
+image observations to the normal planner. Real DM vision completed and correctly
+recognized the Arabic documentation notice and Learn more link; OCR retains
+uncertainty/minor transcription errors and is not a pixel-perfect guarantee.
+
 ## Privacy and operation
 
 Separate SQLite under `/var/lib/pulse/orbit`; backup before additive schema work.
@@ -72,18 +94,16 @@ code-model role, not an authenticated native Codex CLI. AWS currently powers Orb
 
 ## External blockers / unverified
 
-- OpenAI key/chosen model absent. User was asked for a private credential-file
-  path. Live primary/model-role requests cannot yet be tested.
-- Vision model absent. Image receipt/storage is implemented; interpretation must
-  block explicitly rather than pretend to see an image.
+- OpenAI personal API organization inspected through real saved-account login:
+  no API keys, $0.00 credit, no funded billing. Primary API activation needs a
+  spending decision/credentials; no payment or new key was created.
 - Real authenticated website session across restart needs an actual owner login.
 - Native Codex CLI is not connected; the configured code-model role requires
-  OpenAI activation. Real owner approval buttons, incoming file upload and
-  natural proactive developments still need live confirmation.
+  activation. A natural eligible proactive development is still unverified;
+  inspected real event candidates were below policy thresholds, which were preserved.
 
 ## Next
 
-Verify the owner's real DM reply/buttons/file upload when available. Activate
-OpenAI/vision from a private credential-file path and verify actual requests;
-complete a real owner website login/restart check. All other current foundation
+Activate funded OpenAI/native Codex access and verify actual requests;
+complete a real owner website login in Cloud PC and restart check. All other current foundation
 work is deployed. Keep this full goal active while these gates remain unmet.
