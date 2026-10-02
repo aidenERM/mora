@@ -34,9 +34,23 @@ Cloud PC cookie/localStorage restart proof and the successful live agent tasks.
 
 Existing production Bedrock credentials are present. No OpenAI API key was
 found. The user supplied a private Discord credential file outside the repo;
-its token still needs validation. Never copy credentials into documentation.
+its bot token and application identity were verified with official Discord APIs.
+The human application owner was resolved and the bot token/owner restriction
+were provisioned in root-only `/etc/orbit.env`. Never copy credentials into docs.
+
+## Phase 2 checkpoint
+
+Owner-only official Discord DM client, persistent approval buttons, private file/
+screenshot delivery, natural goal input and model-selection phrases implemented.
+Explicit sourced memory supports preferences/style/people/projects/decisions/
+goals/episodes, relevance-limited retrieval, forgetting, deduplication and expiry.
+Raw DM context is capped at 40 messages/14 days; only explicit facts and bounded
+task episodes enter memory. Credentials are redacted/rejected before persistence.
+25 targeted regression tests passed. Live Gateway and DM delivery still pending.
+Image files can be received privately; image interpretation is not yet wired.
 
 ## Next
 
-Commit Phase 1 checkpoint, then implement owner-only Discord DMs and
-minimal sourced memory. Preserve provider-independent state during fallback.
+Deploy Phase 2 and check Gateway/owner DM delivery. Then finish provider selection,
+fallback tests, schedules/Pulse wakeups, and permission configuration. Missing
+OpenAI credentials and real account/device confirmation remain external checks.

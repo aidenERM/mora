@@ -1,5 +1,6 @@
 """Single private Linux runtime. Only a trusted Pulse caller may control it."""
 import hmac
+import base64
 import json
 import os
 from pathlib import Path
@@ -125,17 +126,24 @@ class Runtime:
                 content = file.read(MAX_BODY + 1)
             if len(content) > MAX_BODY:
                 raise ValueError("file exceeds 1 MiB")
-            return {"path": body["path"], "content": content.decode("utf-8")}
+            encoding = body.get("encoding", "utf-8")
+            if encoding not in {"utf-8", "base64"}:
+                raise ValueError("unsupported encoding")
+            return {"path": body["path"], "content": base64.b64encode(content).decode() if encoding == "base64" else content.decode("utf-8"), "encoding": encoding}
         if route == "/v1/files/write":
             path = self.path(body.get("path"))
             content = body.get("content")
             if not isinstance(content, str) or len(content.encode()) > MAX_BODY:
                 raise ValueError("content must be UTF-8 text up to 1 MiB")
+            encoding = body.get("encoding", "utf-8")
+            if encoding not in {"utf-8", "base64"}:
+                raise ValueError("unsupported encoding")
+            raw = base64.b64decode(content, validate=True) if encoding == "base64" else content.encode()
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with path.open("w" if body.get("overwrite") is True else "x", encoding="utf-8") as file:
-                file.write(content)
+            with path.open("wb" if body.get("overwrite") is True else "xb") as file:
+                file.write(raw)
             path.chmod(0o600)
-            return {"path": body["path"], "written": len(content.encode())}
+            return {"path": body["path"], "written": len(raw)}
         if route == "/v1/browser/navigate":
             url = text(body, "url", 8192)
             parsed = urlsplit(url)

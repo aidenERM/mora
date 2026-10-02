@@ -9,6 +9,7 @@ from .engine import Engine
 from .providers import Router
 from .store import Store
 from .tools import Tools
+from .memory import Memory
 
 
 def run_once(store=None, router=None, tools=None):
@@ -17,7 +18,20 @@ def run_once(store=None, router=None, tools=None):
     if not task:
         return {"idle": True}
     tools = tools or Tools(Path(store.path).parent / "artifacts")
-    return Engine(store, router or Router(), tools).execute(task["id"])
+    result = Engine(store, router or Router(), tools).execute(task["id"])
+    if task["source"] == "discord":
+        memory = Memory(store)
+        if result["status"] == "waiting_approval":
+            step = store.history(task["id"])[-1]
+            memory.notice(task["id"], "approval-" + str(step["id"]), step["observation"].get("approval_required", "action needs approval"))
+        elif result["status"] in {"completed", "failed", "blocked", "waiting"}:
+            memory.notice(task["id"], result["status"], result["result"] or "Task stopped: " + result["error"])
+        if result["status"] == "completed":
+            memory.remember((task["goal"] + ": " + result["result"])[:800], "episode", "task:" + task["id"], days=90)
+            screenshots = [step for step in store.history(task["id"], 40) if step["action"] == "browser_screenshot" and step["status"] == "observed"]
+            if screenshots:
+                memory.notice(task["id"], "screenshot", "Screenshot from this task.", screenshots[-1]["observation"]["artifact"])
+    return result
 
 
 def main():

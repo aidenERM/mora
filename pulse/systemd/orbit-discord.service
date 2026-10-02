@@ -1,0 +1,26 @@
+[Unit]
+Description=Orbit private Discord DM interface
+After=network-online.target orbit-worker.service
+Wants=network-online.target orbit-worker.service
+
+[Service]
+Type=simple
+User=pulse
+Group=pulse
+SupplementaryGroups=pulse-cloudpc-control
+WorkingDirectory=/opt/pulse/pulse
+EnvironmentFile=/etc/pulse.env
+EnvironmentFile=/etc/orbit.env
+ExecStart=/opt/pulse/.venv/bin/python -m orbit.discord_dm
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pulse/orbit
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,8 @@ import sqlite3
 import time
 import uuid
 
+from .security import clean
+
 STATES = {"queued", "running", "waiting", "waiting_approval", "completed", "failed", "blocked", "cancelled"}
 
 
@@ -52,7 +54,7 @@ class Store:
         task_id, now = uuid.uuid4().hex, time.time()
         with self.connect() as db:
             db.execute("INSERT OR IGNORE INTO tasks(id,goal,status,model,max_steps,created,updated,source,source_key,metadata,wake_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                       (task_id, goal.strip(), "waiting" if wake_at else "queued", model, max_steps, now, now, source, source_key, json.dumps(metadata or {}), wake_at))
+                       (task_id, clean(goal.strip()), "waiting" if wake_at else "queued", model, max_steps, now, now, source, source_key, json.dumps(clean(metadata or {})), wake_at))
             if source_key:
                 task_id = db.execute("SELECT id FROM tasks WHERE source_key=?", (source_key,)).fetchone()[0]
         return self.task(task_id)
@@ -76,7 +78,7 @@ class Store:
         with self.connect() as db:
             # Cancellation is terminal, even if a model or tool was in flight.
             db.execute("UPDATE tasks SET status=?,result=?,error=?,wake_at=?,updated=? WHERE id=? AND status!='cancelled'",
-                       (status, result[:4000], error[:160], wake_at, time.time(), task_id))
+                       (status, clean(result)[:4000], error[:160], wake_at, time.time(), task_id))
 
     def cancel(self, task_id):
         with self.connect() as db:
@@ -107,13 +109,13 @@ class Store:
     def start_step(self, task_id, action, arguments):
         now = time.time()
         with self.connect() as db:
-            cursor = db.execute("INSERT INTO steps(task_id,action,arguments,status,created,updated) VALUES(?,?,?,'started',?,?)", (task_id, action, json.dumps(arguments), now, now))
+            cursor = db.execute("INSERT INTO steps(task_id,action,arguments,status,created,updated) VALUES(?,?,?,'started',?,?)", (task_id, action, json.dumps(clean(arguments)), now, now))
             db.execute("UPDATE tasks SET steps=steps+1,updated=? WHERE id=?", (now, task_id))
             return cursor.lastrowid
 
     def finish_step(self, step_id, observation, status="observed"):
         with self.connect() as db:
-            db.execute("UPDATE steps SET status=?,observation=?,updated=? WHERE id=?", (status, json.dumps(observation), time.time(), step_id))
+            db.execute("UPDATE steps SET status=?,observation=?,updated=? WHERE id=?", (status, json.dumps(clean(observation)), time.time(), step_id))
 
     def history(self, task_id, limit=8):
         with self.connect() as db:

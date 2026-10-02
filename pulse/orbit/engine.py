@@ -3,11 +3,14 @@ import json
 import time
 
 from .tools import TOOLS, risk, READ_TOOLS
+from .memory import Memory
+from .security import clean
 
 
 class Engine:
     def __init__(self, store, router, tools):
         self.store, self.router, self.tools = store, router, tools
+        self.memory = Memory(store)
 
     def execute(self, task_id):
         errors = 0
@@ -29,20 +32,24 @@ class Engine:
                 else:
                     compact = [{"action": row["action"], "status": row["status"], "observation": json.dumps(row["observation"])[:3500]} for row in history[-6:]]
                     context = {"goal": task["goal"], "constraints": task["metadata"], "observations": compact,
+                               "memory": self.memory.retrieve(task["goal"]),
+                               "now": datetime.now(timezone.utc).isoformat(), "timezone": "America/Bogota",
                                "remaining_steps": task["max_steps"] - task["steps"]}
                     decision, usage = self.router.decide(task, context)
                     if self.store.task(task_id)["status"] != "running":
                         return self.store.task(task_id)
                     action = decision["action"]
-                    args = json.loads(decision["arguments"] or "{}")
+                    args = clean(json.loads(decision["arguments"] or "{}"))
                     if not isinstance(args, dict):
                         raise ValueError("arguments must be an object")
                     step = self.store.start_step(task_id, action, args)
                     self.store.state("last_provider", usage)
+                    if usage.get("fallback_from"):
+                        self.memory.notice(task_id, "fallback", "OpenAI failed. I’m continuing this task through AWS with the same context.")
                     if action == "finish":
                         proposed_checks = json.loads(decision["verification"] or "[]")
                         with self.store.connect() as db:
-                            db.execute("UPDATE steps SET arguments=? WHERE id=?", (json.dumps({"checks": proposed_checks}), step))
+                            db.execute("UPDATE steps SET arguments=? WHERE id=?", (json.dumps(clean({"checks": proposed_checks})), step))
                         checks = self.tools.verify(proposed_checks)
                         self.store.finish_step(step, {"summary": decision["summary"], "checks": checks}, "verified")
                         self.store.change(task_id, "completed", result=decision["summary"])

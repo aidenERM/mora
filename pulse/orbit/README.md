@@ -47,3 +47,24 @@ with a ChatGPT subscription.
 The persistent profile stores login state, but individual providers can revoke
 or expire sessions. Actual authenticated-account restart testing is still
 pending and must not be inferred from the synthetic cookie test.
+
+## Discord and memory
+
+Install `orbit/requirements.txt` into the existing Pulse virtual environment.
+The root-only provisioner accepts bot token/application ID over stdin, verifies
+official bot/application identity, resolves the application owner, and writes
+`/etc/orbit.env` with mode `0600`. Install `orbit-discord.service` and restart
+`orbit-worker` to load the optional environment file. No user tokens are used.
+
+Only the configured owner's private DMs are processed. Natural goals create
+tasks. Examples: `remember Pulse is my project`, `what happened while I was gone`,
+`cancel that`, and `use aws for this`. Explicit memory is sourced and forgettable.
+Approvals arrive as buttons plus the full proposed action JSON. The worker checks
+expiry and single use. Private screenshot artifacts can be sent back to the owner.
+Incoming files are capped at 700 KB; credential attachments are rejected.
+Images are stored as files; model vision is not yet configured.
+
+DM delivery requires Discord to permit the bot to contact its owner, commonly
+through a shared server or supported application installation. Startup records
+connection/delivery failures without exposing tokens. Failed or ambiguous sends
+are retained for review rather than automatically repeated into spam.
