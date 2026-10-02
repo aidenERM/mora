@@ -7,7 +7,7 @@ Runtime → Discord/memory → model routing → AWS fallback → schedules/Puls
 and its 15-minute worker. No new paid resources or provider accounts.
 
 Deployed checkpoints: Cloud PC `a51f151`, runtime `a0d4598`, Discord/memory
-`e9b48f9`. The latest group extends phases 3–6; deployment/live checks pending.
+`e9b48f9`, model/schedule/policy group `cad0074`, startup transport fix `db7cad0`.
 Always inspect git HEAD before assuming a revision.
 
 ## Implemented
@@ -43,9 +43,22 @@ Phase 2: 25 tests. Official Discord bot/application identity verified, owner
 resolved, Gateway connected, initial private DM accepted. Credentials exist only
 in root-owned `/etc/orbit.env` (0600), not source/model prompts.
 
-Latest full local suite: 123 passed, syntax checks passed, credential scan clear.
-Current-group live fallback, scheduling, browser-binding and binary/file-range
-checks remain pending deployment verification.
+Latest full local suite: 125 passed, including startup transport regressions.
+Syntax checks passed; provided bot token absent from staged files.
+
+Current-group live proof: authenticated/path-confined Cloud PC survived restart,
+retaining identity, workspace, session cookie/localStorage and screenshot access.
+Stale file hashes and stale browser approvals were rejected. Binary PNG roundtrip
+and exact patch preservation passed. Cached live Pulse calendar context read
+without sync or mutation. Injected primary outage completed a real AWS/Cloud PC
+file goal in 3 steps. A future task woke on the real worker, verified runtime
+health in 2 steps, completed and sent its private Discord completion message.
+A non-sensitive real PNG screenshot was also accepted in the owner's Discord DM.
+
+All five services active: pulse, pulse-worker, pulse-cloudpc, orbit-worker,
+orbit-discord. HTTPS health good. Actual Pulse process retains poll_minutes=15
+and proactive_enabled=1. No natural eligible proactive task has occurred yet.
+Incoming owner DM count was zero at the latest check; user was asked to reply hi.
 
 ## Privacy and operation
 
@@ -62,11 +75,13 @@ code-model role, not an authenticated native Codex CLI. AWS currently powers Orb
 - Vision model absent. Image receipt/storage is implemented; interpretation must
   block explicitly rather than pretend to see an image.
 - Real authenticated website session across restart needs an actual owner login.
-- Native Codex, real owner DM replies/buttons, incoming file upload and natural
-  proactive developments need live confirmation.
+- Native Codex CLI is not connected; the configured code-model role requires
+  OpenAI activation. Real owner DM replies/buttons, incoming file upload and
+  natural proactive developments still need live confirmation.
 
 ## Next
 
-Finish tests/deployment and live AWS fallback/scheduling checks. Then activate
-credential-dependent capabilities. Do not mark the goal complete merely because
-the AWS foundation works.
+Verify the owner's real DM reply/buttons/file upload when available. Activate
+OpenAI/vision from a private credential-file path and verify actual requests;
+complete a real owner website login/restart check. All other current foundation
+work is deployed. Keep this full goal active while these gates remain unmet.
