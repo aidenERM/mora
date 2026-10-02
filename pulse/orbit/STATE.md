@@ -113,8 +113,12 @@ No OpenAI API payment, key creation, or security-setting change was performed.
   spending decision/credentials; no payment or new key was created.
 - Real authenticated website session across restart needs an actual owner login.
 - Native Codex CLI is not connected; the configured code-model role requires
-  activation. A natural eligible proactive development is still unverified;
-  inspected real event candidates were below policy thresholds, which were preserved.
+  activation. A real naturally enqueued iCloud Mail event investigation initially
+  failed on SQLite access. After the existing mount fix, resuming the same task
+  completed with browser source observation and independent finish verification
+  (task 7044d1c5314c446d83ad512f565a20cb). This verifies live source-to-Orbit
+  investigation, not delivery of a new material finding. Notification delivery
+  remains gated by existing source validation/relevance/quiet-hours rules.
 
 ## Next
 
