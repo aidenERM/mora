@@ -43,6 +43,14 @@ def main():
     marker = "probe-" + uuid.uuid4().hex
     path = "verification/" + marker + ".txt"
     try:
+        for _ in range(60):
+            try:
+                client.request("/v1/health")
+                break
+            except OSError:
+                time.sleep(1)
+        else:
+            raise AssertionError("runtime never became ready")
         try:
             urlopen(client.base + "/v1/health", timeout=5)
             raise AssertionError("unauthenticated access allowed")

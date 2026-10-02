@@ -1,8 +1,10 @@
 """Internal Pulse client. Credentials remain server-side."""
 import json
 import os
+import time
 from pathlib import Path
 from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 
 class CloudPC:
@@ -18,6 +20,15 @@ class CloudPC:
         request = Request(self.base + endpoint, data=data, headers={
             "Authorization": "Bearer " + token, "Content-Type": "application/json",
         })
-        with urlopen(request, timeout=70) as response:
-            result = response.read()
-            return result if response.headers.get_content_type() == "image/png" else json.loads(result)
+        for attempt in range(4):
+            try:
+                with urlopen(request, timeout=70) as response:
+                    result = response.read()
+                    return result if response.headers.get_content_type() == "image/png" else json.loads(result)
+            except URLError as exc:
+                # Connection refusal means no action reached the server. Never
+                # replay a POST after an ambiguous timeout or lost response.
+                if attempt < 3 and isinstance(exc.reason, ConnectionRefusedError):
+                    time.sleep(1)
+                    continue
+                raise
