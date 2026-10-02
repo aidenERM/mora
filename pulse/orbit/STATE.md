@@ -58,7 +58,9 @@ A non-sensitive real PNG screenshot was also accepted in the owner's Discord DM.
 All five services active: pulse, pulse-worker, pulse-cloudpc, orbit-worker,
 orbit-discord. HTTPS health good. Actual Pulse process retains poll_minutes=15
 and proactive_enabled=1. No natural eligible proactive task has occurred yet.
-Incoming owner DM count was zero at the latest check; user was asked to reply hi.
+The owner's real greeting arrived, verifying inbound DMs. This exposed a stale
+connection flag after Gateway resume; resume and accepted owner messages now
+restore that flag. Nine targeted memory/Discord tests passed for this fix.
 
 ## Privacy and operation
 
@@ -76,7 +78,7 @@ code-model role, not an authenticated native Codex CLI. AWS currently powers Orb
   block explicitly rather than pretend to see an image.
 - Real authenticated website session across restart needs an actual owner login.
 - Native Codex CLI is not connected; the configured code-model role requires
-  OpenAI activation. Real owner DM replies/buttons, incoming file upload and
+  OpenAI activation. Real owner approval buttons, incoming file upload and
   natural proactive developments still need live confirmation.
 
 ## Next

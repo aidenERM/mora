@@ -82,12 +82,16 @@ class OrbitDiscord(discord.Client):
     async def on_disconnect(self):
         self.store.state("discord", {"connected": False, "updated_at": time.time()})
 
+    async def on_resumed(self):
+        self.store.state("discord", {"connected": True, "resumed_at": time.time()})
+
     async def on_error(self, event, *args, **kwargs):
         self.store.state("discord_error", {"event": event, "updated_at": time.time()})
 
     async def on_message(self, message):
         if message.guild is not None or message.author.bot or message.author.id != self.owner_id:
             return
+        self.store.state("discord", {"connected": True, "received_at": time.time()})
         text = clean(message.content.strip())
         attachments = []
         for index, attachment in enumerate(message.attachments[:3]):

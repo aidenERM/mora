@@ -118,3 +118,12 @@ def test_owner_only_approval_button(tmp_path):
         await view.children[0].callback(interaction)
         assert bot.store.task(task["id"])["status"] == "queued"
     asyncio.run(run())
+
+
+def test_gateway_resume_restores_connection_status(tmp_path):
+    from orbit.discord_dm import OrbitDiscord
+    bot = OrbitDiscord(Store(tmp_path / "orbit.sqlite3"), owner_id=123)
+    asyncio.run(bot.on_disconnect())
+    assert not bot.store.state("discord")["connected"]
+    asyncio.run(bot.on_resumed())
+    assert bot.store.state("discord")["connected"]
