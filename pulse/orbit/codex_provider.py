@@ -48,6 +48,10 @@ def decide(payload, model, instructions):
                 item = event.get('item', {})
                 if item.get('type') == 'agent_message':
                     messages.append(item.get('text', ''))
+                elif item.get('type') == 'error' and item.get('message') == 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.':
+                    # CLI 0.150.1 emits this startup warning when we deliberately
+                    # disable its tool host. It is not a failed model turn.
+                    continue
                 elif item.get('type') != 'reasoning':
                     raise ProviderError('unexpected_native_tool')
             elif event.get('type') == 'turn.completed':

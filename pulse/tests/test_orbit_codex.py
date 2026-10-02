@@ -29,7 +29,8 @@ def test_native_decision_uses_schema_and_no_execution_tools(tmp_path, monkeypatc
         calls.append((args, kwargs))
         schema = json.loads(open(args[args.index('--output-schema') + 1]).read())
         assert schema['additionalProperties'] is False
-        return SimpleNamespace(returncode=0, stdout=json.dumps({'type':'item.completed', 'item':{'type':'agent_message','text':json.dumps(decision)}})+'\n'+json.dumps({'type':'turn.completed'}), stderr='')
+        warning = {'type':'item.completed','item':{'type':'error','message':'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.'}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(warning)+'\n'+json.dumps({'type':'item.completed', 'item':{'type':'agent_message','text':json.dumps(decision)}})+'\n'+json.dumps({'type':'turn.completed'}), stderr='')
     monkeypatch.setattr(subprocess, 'run', run)
     result, metadata = decide({'task': {'goal':'inspect'}}, 'verified-model', 'instructions')
     assert result == decision and metadata['provider'] == 'codex'
